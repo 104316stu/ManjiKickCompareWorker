@@ -72,5 +72,7 @@ Tray: pick the mode in the menu. Command line: `--mode light|balanced|max|auto`
 (on Linux, Auto follows the load average), `--threads N` to fix the count,
 `--duty 0.2` to use at most a fifth of the CPU time.
 
+If YouTube keeps asking this machine to sign in, point `MKW_COOKIES` at a cookies.txt (Netscape format) for a YouTube account.
+
 Settings live in `%LOCALAPPDATA%\ManjiKickWorker\config` (Windows) or `~/.config/mkworker/config`
 (Linux). Set `ytdlp`, `ffmpeg` or `deno` to `system` or a path to use your own copies.

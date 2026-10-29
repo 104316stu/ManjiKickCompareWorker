@@ -229,6 +229,12 @@ fn download(cancel: &dyn Fn() -> bool, tools: &Tools, video_id: &str, folder: &P
     if let Some(deno) = &tools.deno {
         cmd.arg("--js-runtimes").arg(format!("deno:{}", deno.display()));
     }
+    // An optional YouTube cookie file (Netscape format) for machines whose
+    // address YouTube asks to sign in; yt-dlp may rewrite it, so it's used
+    // from its own path and never sent anywhere else.
+    if let Some(cookies) = std::env::var_os("MKW_COOKIES").filter(|p| Path::new(p).is_file()) {
+        cmd.arg("--cookies").arg(cookies);
+    }
     // The id goes after "--" so it can never be read as an option.
     cmd.arg("--").arg(format!("https://www.youtube.com/watch?v={video_id}"));
     let (status, cpu) = crate::proc::run(&mut cmd, Instant::now() + limit, cancel);
