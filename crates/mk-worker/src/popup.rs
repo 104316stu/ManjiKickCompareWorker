@@ -41,7 +41,8 @@ struct Popup {
     visible: bool,
     ready: bool,
     hidden_at: Option<Instant>,
-    failed: bool,
+    /// Creating WebView2 failed (when): use the menu, retry a bit later.
+    failed: Option<Instant>,
     handler: Handler,
     data_dir: std::path::PathBuf,
 }
@@ -88,7 +89,7 @@ pub fn init(tray: HWND, data_dir: std::path::PathBuf, handler: Handler) {
         POPUP.with(|p| {
             *p.borrow_mut() = Some(Popup {
                 hwnd, tray, controller: None, webview: None, visible: false, ready: false,
-                hidden_at: None, failed: hwnd.is_null(), handler, data_dir,
+                hidden_at: None, failed: hwnd.is_null().then(Instant::now), handler, data_dir,
             })
         });
     }
@@ -180,7 +181,7 @@ fn on_page(cmd: &str, value: &str, handler: Handler) {
 pub fn toggle() -> bool {
     let state = POPUP.with(|p| p.borrow().as_ref().map(|p| (p.visible, p.failed, p.hidden_at)));
     let Some((visible, failed, hidden_at)) = state else { return false };
-    if failed {
+    if failed.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
         return false;
     }
     if visible {
@@ -195,7 +196,20 @@ pub fn toggle() -> bool {
     show()
 }
 
+/// Creates WebView2 without showing it (MKW_POPUP_SELFTEST=1 checks this
+/// machine can host the panel; the result is logged).
+pub fn prewarm() -> bool {
+    ensure_webview()
+}
+
 fn show() -> bool {
+    if !ensure_webview() {
+        return false;
+    }
+    show_window()
+}
+
+fn ensure_webview() -> bool {
     // Create on first use (and again after it was closed to save memory).
     let need = POPUP.with(|p| p.borrow().as_ref().map(|p| (p.controller.is_none(), p.hwnd, p.data_dir.clone(), p.handler)));
     let Some((need, hwnd, data_dir, handler)) = need else { return false };
@@ -203,6 +217,9 @@ fn show() -> bool {
         match create_webview(hwnd, &data_dir, handler) {
             Ok((c, w)) => POPUP.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
+                    if p.failed.take().is_some() {
+                        crate::log!("popup ready");
+                    }
                     p.controller = Some(c);
                     p.webview = Some(w);
                     p.ready = false;
@@ -212,13 +229,17 @@ fn show() -> bool {
                 crate::log!("popup unavailable, using the menu: {e}");
                 POPUP.with(|p| {
                     if let Some(p) = p.borrow_mut().as_mut() {
-                        p.failed = true;
+                        p.failed = Some(Instant::now());
                     }
                 });
                 return false;
             }
         }
     }
+    true
+}
+
+fn show_window() -> bool {
     POPUP.with(|p| {
         let mut b = p.borrow_mut();
         let Some(p) = b.as_mut() else { return false };

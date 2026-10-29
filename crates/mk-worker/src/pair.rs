@@ -35,6 +35,9 @@ fn post(server: &str, path: &str, body: &Value) -> Result<Value, String> {
         .send_string(&body.to_string())
         .map_err(|e| match e {
             ureq::Error::Status(429, _) => "the site asked to slow down; try again in a minute".to_string(),
+            ureq::Error::Status(400 | 404 | 405, _) if path == "/pair/start" => {
+                "the site doesn't support pairing yet; try again later".to_string()
+            }
             ureq::Error::Status(c, _) => format!("the site answered HTTP {c}"),
             ureq::Error::Transport(t) => format!("can't reach the site: {t}"),
         })?;

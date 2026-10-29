@@ -16,6 +16,9 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WM_TRAY: u32 = WM_APP + 1;
+/// Sent by a second launch: open the panel of the one already running.
+const WM_OPEN_PANEL: u32 = WM_APP + 2;
+const CLASS_NAME: &str = "ManjiKickWorkerTray";
 const TIMER_ID: usize = 1;
 
 const ID_RUNNING: u32 = 10;
@@ -30,6 +33,7 @@ const ID_TOKEN: u32 = 40;
 const ID_LOGS: u32 = 41;
 const ID_PAIR: u32 = 42;
 const ID_SITE: u32 = 43;
+const ID_PANEL: u32 = 44;
 const ID_QUIT: u32 = 50;
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -239,6 +243,8 @@ fn show_menu(hwnd: HWND) {
     let cfg: Config = sh.cfg.lock().unwrap().clone();
     unsafe {
         let menu = CreatePopupMenu();
+        add(menu, ID_PANEL, "Open panel", false, true);
+        separator(menu);
         add(menu, 1, &sh.status_text(), false, false);
         add(menu, 2, &sh.today_text(), false, false);
         add(menu, 3, &sh.now_text(), false, false);
@@ -306,6 +312,12 @@ fn command(hwnd: HWND, id: u32) {
             let _ = std::process::Command::new("explorer.exe").arg(sh.paths.log_dir()).spawn();
         }
         ID_SITE => open_url(&sh.cfg.lock().unwrap().server.clone()),
+        ID_PANEL => {
+            if !crate::popup::is_visible() && !crate::popup::toggle() {
+                notify(hwnd, NIM_MODIFY, Some(("Panel unavailable", "It could not be opened; the log folder has the reason.")));
+                return;
+            }
+        }
         ID_PAIR => sh.start_pairing(crate::pair::hostname(), open_url),
         ID_QUIT => unsafe { PostQuitMessage(0) },
         _ => {}
@@ -375,6 +387,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             0
         }
+        WM_OPEN_PANEL => {
+            if !crate::popup::is_visible() && !crate::popup::toggle() {
+                show_menu(hwnd);
+            }
+            0
+        }
         WM_TIMER => {
             notify(hwnd, NIM_MODIFY, None);
             crate::popup::tick(popup_state);
@@ -400,6 +418,9 @@ pub fn main() {
     }
     crate::update::set_asset("mkworker-tray.exe");
     unsafe {
+        // WebView2 (the popup) is COM and needs a single-threaded apartment
+        // on this, the UI thread.
+        windows_sys::Win32::System::Com::CoInitializeEx(std::ptr::null(), 2); // COINIT_APARTMENTTHREADED
         // Sharp text and a correctly sized popup on scaled displays.
         windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(-4isize as _);
     }
@@ -407,9 +428,16 @@ pub fn main() {
     paths.create_all();
     crate::logging::init(&paths.log_file, false);
     let Some(_instance) = crate::platform::single_instance_after_update() else {
+        // Already running: open its panel instead (like a second click on the icon).
         unsafe {
-            MessageBoxW(std::ptr::null_mut(), wide("The ManjiKick worker is already running (see the tray).").as_ptr(),
-                wide("ManjiKick worker").as_ptr(), MB_OK | MB_ICONINFORMATION);
+            let other = FindWindowW(wide(CLASS_NAME).as_ptr(), std::ptr::null());
+            if !other.is_null() {
+                AllowSetForegroundWindow(u32::MAX); // ASFW_ANY
+                PostMessageW(other, WM_OPEN_PANEL, 0, 0);
+            } else {
+                MessageBoxW(std::ptr::null_mut(), wide("The ManjiKick worker is already running (see the tray).").as_ptr(),
+                    wide("ManjiKick worker").as_ptr(), MB_OK | MB_ICONINFORMATION);
+            }
         }
         return;
     };
@@ -442,7 +470,7 @@ pub fn main() {
     unsafe {
         let _ = TASKBAR_CREATED.set(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
         let hinst = GetModuleHandleW(std::ptr::null());
-        let class = wide("ManjiKickWorkerTray");
+        let class = wide(CLASS_NAME);
         let wc = WNDCLASSW {
             style: 0,
             lpfnWndProc: Some(wndproc),
@@ -461,6 +489,9 @@ pub fn main() {
         TRAY_HWND.with(|h| h.set(hwnd));
         notify(hwnd, NIM_ADD, None);
         crate::popup::init(hwnd, sh.paths.state_dir.join("webview"), popup_command);
+        if std::env::var_os("MKW_POPUP_SELFTEST").is_some() {
+            crate::log!("popup self-test: {}", if crate::popup::prewarm() { "WebView2 created" } else { "failed" });
+        }
         if sh.paths.read_token().is_none() {
             notify(hwnd, NIM_MODIFY, Some(("ManjiKick worker", "Click here, then Connect to site.")));
         }
