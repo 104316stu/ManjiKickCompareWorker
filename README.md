@@ -10,7 +10,7 @@ checked by sha256).
 Get the latest build from [Releases](../../releases):
 
 - Windows: `mkworker-tray.exe` (tray app) and `mkworker.exe` (command line)
-- Linux: `mkworker-linux-x86_64` (static, no dependencies)
+- Linux: `mkworker-linux-x86_64` or `mkworker-linux-aarch64` (ARM), static, no dependencies
 
 Connect it to the site by approving a code (below); it updates itself from new releases
 (`auto_update = false` in the config turns that off, `mkworker update` updates now).
@@ -42,19 +42,20 @@ Check that downloads work here: `~/mkworker test-download dQw4w9WgXcQ`.
 
 ## HidenCloud
 
-For panels that only start a Python file: upload `mkworker-linux-x86_64` with this `FUF.py`
-next to it and put your token in `mkworker-data/token`.
+For panels that only start a Python file: upload the Linux binary for its CPU with this `FUF.py`
+next to it. It registers itself on first start.
 
 ```python
-import os, subprocess, sys, time
+import os, platform, subprocess, sys, time
 here = os.path.dirname(os.path.abspath(__file__))
-exe = os.path.join(here, "mkworker-linux-x86_64")
+arch = "aarch64" if platform.machine() in ("aarch64", "arm64") else "x86_64"
+exe = os.path.join(here, f"mkworker-linux-{arch}")
 os.environ.setdefault("MKW_HOME", os.path.join(here, "mkworker-data"))
 os.chmod(exe, 0o755)
 while True:
     code = subprocess.call([exe, "run", "--mode", "max", "--threads", "1", "--duty", "0.2", "--foreground-status"])
     if code == 3:
-        sys.exit("worker token rejected: put a new one in mkworker-data/token")
+        sys.exit("worker token rejected: delete mkworker-data/token to register again")
     time.sleep(60)
 ```
 

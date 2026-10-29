@@ -56,6 +56,8 @@ fn main() {
         mkworker::update::set_asset("mkworker.exe");
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         mkworker::update::set_asset("mkworker-linux-x86_64");
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        mkworker::update::set_asset("mkworker-linux-aarch64");
     }
     let paths = Paths::get();
     match args.first().map(String::as_str) {
