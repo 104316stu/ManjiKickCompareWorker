@@ -75,6 +75,8 @@
   .link svg { width: 15px; height: 15px; stroke: var(--muted); fill: none; stroke-width: 1.6; flex: none; }
   .link .sub { margin-left: auto; color: var(--faint); font-size: 11px; }
   .pair { background: var(--tile); border: 1px solid var(--tile-line); border-radius: 8px; padding: 7px 9px; margin-top: 4px; font-size: 12px; color: var(--muted); }
+  .pair a { color: var(--accent); cursor: pointer; font-size: 12px; }
+  .pair a:hover { text-decoration: underline; }
   .pair b { display: block; color: var(--text); font-size: 18px; letter-spacing: 1.5px; font-variant-numeric: tabular-nums; margin: 2px 0; }
   .power { margin-left: auto; width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--tile-line); background: var(--tile); display: grid; place-items: center; }
   .power:hover { border-color: #5a2a29; }
@@ -126,7 +128,7 @@
       <div class="link" data-open="site"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg>Open the site</div>
       <div class="link" data-open="logs"><svg viewBox="0 0 16 16"><path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/></svg>Open log folder</div>
       <div class="link" id="pair-link"><svg viewBox="0 0 16 16"><path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.8 2.8 0 0 1 4 4l-1 1M9 11.5l-1 1a2.8 2.8 0 0 1-4-4l1-1"/></svg><span id="pair-label">Connect to site</span><span class="sub" id="pair-sub"></span></div>
-      <div class="pair" id="pair-box" hidden><span id="pair-msg"></span><b id="pair-code"></b></div>
+      <div class="pair" id="pair-box" hidden><span id="pair-msg"></span><b id="pair-code"></b><a id="pair-open" hidden>Open approve page</a></div>
     </div>
   </section>
   <footer class="foot">
@@ -151,6 +153,7 @@
   });
   document.querySelectorAll("[data-open]").forEach(l => l.onclick = () => send("open", l.dataset.open));
   $("pair-link").onclick = () => send("pair");
+  $("pair-open").onclick = () => send("open", "approve");
   $("quit").onclick = () => send("quit");
   document.addEventListener("keydown", e => { if (e.key === "Escape") send("hide"); });
   document.addEventListener("contextmenu", e => e.preventDefault());
@@ -180,6 +183,7 @@
     $("pair-msg").textContent = p.message || "";
     $("pair-code").textContent = p.code || "";
     $("pair-code").hidden = !p.code;
+    $("pair-open").hidden = !(p.active && p.url);
   }
   window.chrome.webview.addEventListener("message", e => render(e.data));
   send("ready");

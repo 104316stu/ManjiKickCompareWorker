@@ -85,6 +85,9 @@ pub struct State {
     /// A checked new release waiting to be swapped in: (file, tag).
     pub update_ready: Option<(std::path::PathBuf, String)>,
     pub update_checking: bool,
+    /// Automatic pairing (tray): not before this; the browser opens once.
+    pub auto_pair_after: f64,
+    pub pair_browser_opened: bool,
     /// Set when the engine stopped to restart into the swapped-in program.
     pub restart: bool,
     pub server_name: Option<String>,
@@ -109,6 +112,8 @@ pub struct Shared {
     pub dry_run: bool,
     /// The tray: battery/fullscreen/busy pauses and the Running toggle apply.
     pub interactive: bool,
+    /// Opens a web page (the tray sets it); enables automatic pairing.
+    pub opener: Mutex<Option<fn(&str)>>,
     pub quit: AtomicBool,
     pub st: Mutex<State>,
 }
@@ -128,6 +133,7 @@ impl Shared {
             threads_override,
             dry_run,
             interactive,
+            opener: Mutex::new(None),
             quit: AtomicBool::new(false),
             st: Mutex::new(State {
                 phase: Phase::Starting,
@@ -146,6 +152,8 @@ impl Shared {
                 update_text: String::new(),
                 update_ready: None,
                 update_checking: false,
+                auto_pair_after: 0.0,
+                pair_browser_opened: false,
                 restart: false,
                 server_name: None,
                 trust: None,
@@ -204,7 +212,7 @@ impl Shared {
         match &st.phase {
             Phase::Starting => "Starting".into(),
             Phase::Setup(s) => format!("Setting up: {s}"),
-            Phase::NoToken => "Not connected to the site".into(),
+            Phase::NoToken => "Connecting to the site".into(),
             Phase::TokenRejected(s) => format!("Token rejected ({s})"),
             Phase::Offline(s) => format!("Can't reach the site: {s}"),
             Phase::Off => "Off".into(),
@@ -302,7 +310,9 @@ impl Shared {
             Phase::Paused(_) | Phase::Cooldown => ("Paused", "paused"),
             Phase::Updating(_) => ("Updating", "busy"),
             Phase::Off => ("Off", "off"),
-            Phase::NoToken | Phase::TokenRejected(_) => ("Token problem", "error"),
+            // Not connected yet: pairing runs by itself, nothing is wrong.
+            Phase::NoToken => ("Connecting\u{2026}", "paused"),
+            Phase::TokenRejected(_) => ("Token problem", "error"),
             Phase::Offline(_) => ("Offline", "error"),
             Phase::Starting | Phase::Setup(_) => ("Starting", "busy"),
         };
@@ -329,12 +339,14 @@ impl Shared {
 
     /// Starts pairing in the background: asks the site for a code, opens the
     /// approve page with `open`, waits, saves the token.
-    pub fn start_pairing(self: &Arc<Self>, name: String, open: fn(&str)) {
+    pub fn start_pairing(self: &Arc<Self>, name: String, open: fn(&str), open_browser: bool) {
         {
             let mut st = self.st.lock().unwrap();
             if st.pairing.active {
                 if let Some(url) = st.pairing.url.clone() {
-                    open(&url);
+                    if open_browser {
+                        open(&url);
+                    }
                 }
                 return;
             }
@@ -356,9 +368,12 @@ impl Shared {
             set(&|p| {
                 p.code = Some(started.code.clone());
                 p.url = Some(started.approve_url.clone());
-                p.message = "Approve this code on the site".into();
+                p.message = "Approve it in your browser".into();
             });
-            open(&started.approve_url);
+            if open_browser {
+                open(&started.approve_url);
+                sh.st.lock().unwrap().pair_browser_opened = true;
+            }
             let outcome = crate::pair::wait(&server, &started, &|| sh.quitting());
             let message = match outcome {
                 Ok(crate::pair::Outcome::Approved(token)) => match sh.paths.write_token(&token) {
@@ -370,7 +385,7 @@ impl Shared {
                     Err(e) => format!("Couldn't save the token: {e}"),
                 },
                 Ok(crate::pair::Outcome::Denied) => "Denied on the site".into(),
-                Ok(crate::pair::Outcome::Expired) => "The code expired; try again".into(),
+                Ok(crate::pair::Outcome::Expired) => "The code expired; a new one follows".into(),
                 Ok(crate::pair::Outcome::Cancelled) => "Cancelled".into(),
                 Err(e) => format!("Pairing failed: {e}"),
             };
@@ -603,6 +618,25 @@ impl Engine {
                 }
                 std::thread::sleep(Duration::from_millis(500));
                 continue;
+            }
+
+            // Tray: no (working) token means pair, by itself. The browser opens
+            // the first time only; new codes come at most every 5 minutes.
+            if sh.interactive && api.is_none() {
+                let open = *sh.opener.lock().unwrap();
+                let first = {
+                    let mut st = sh.st.lock().unwrap();
+                    let unpaired = matches!(st.phase, Phase::NoToken | Phase::TokenRejected(_));
+                    if open.is_some() && unpaired && !st.pairing.active && now >= st.auto_pair_after {
+                        st.auto_pair_after = now + 300.0;
+                        Some(!st.pair_browser_opened)
+                    } else {
+                        None
+                    }
+                };
+                if let (Some(first), Some(open)) = (first, open) {
+                    sh.start_pairing(crate::pair::hostname(), open, first);
+                }
             }
 
             // The CLI stops on a rejected token (the tray waits for a new one).

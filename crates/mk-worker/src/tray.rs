@@ -34,6 +34,7 @@ const ID_LOGS: u32 = 41;
 const ID_PAIR: u32 = 42;
 const ID_SITE: u32 = 43;
 const ID_PANEL: u32 = 44;
+const ID_APPROVE: u32 = 45;
 const ID_QUIT: u32 = 50;
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -71,7 +72,8 @@ fn look() -> Look {
         Phase::Running => Look::Green,
         Phase::Paused(_) | Phase::Cooldown => Look::Amber,
         Phase::Off => Look::Grey,
-        Phase::NoToken | Phase::TokenRejected(_) | Phase::Offline(_) => Look::Red,
+        Phase::NoToken => Look::Amber,
+        Phase::TokenRejected(_) | Phase::Offline(_) => Look::Red,
         Phase::Starting | Phase::Setup(_) | Phase::Updating(_) => Look::Blue,
     }
 }
@@ -318,7 +320,13 @@ fn command(hwnd: HWND, id: u32) {
                 return;
             }
         }
-        ID_PAIR => sh.start_pairing(crate::pair::hostname(), open_url),
+        ID_PAIR => sh.start_pairing(crate::pair::hostname(), open_url, true),
+        ID_APPROVE => {
+            let url = sh.st.lock().unwrap().pairing.url.clone();
+            if let Some(url) = url {
+                open_url(&url);
+            }
+        }
         ID_QUIT => unsafe { PostQuitMessage(0) },
         _ => {}
     }
@@ -356,6 +364,7 @@ fn popup_command(cmd: &str, value: &str) {
         ("open", "logs") => ID_LOGS,
         ("open", "site") => ID_SITE,
         ("pair", _) => ID_PAIR,
+        ("open", "approve") => ID_APPROVE,
         ("quit", _) => ID_QUIT,
         _ => 0,
     };
@@ -370,6 +379,7 @@ fn popup_command(cmd: &str, value: &str) {
 }
 
 thread_local! {
+    static AUTO_OPENED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static TRAY_HWND: std::cell::Cell<HWND> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
@@ -395,6 +405,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_TIMER => {
             notify(hwnd, NIM_MODIFY, None);
+            // First run: show the panel by itself once a pairing code is there.
+            let code_shown = shared().st.lock().unwrap().pairing.code.is_some();
+            if code_shown && !AUTO_OPENED.with(|a| a.replace(true)) && !crate::popup::is_visible() {
+                crate::popup::toggle();
+            }
             crate::popup::tick(popup_state);
             if shared().quitting() {
                 PostQuitMessage(0);
@@ -457,6 +472,7 @@ pub fn main() {
     crate::log!("mkworker-tray {} starting", crate::VERSION);
     let dry_run = std::env::var_os("MKW_DRY_RUN").is_some_and(|v| v == "1");
     let sh = Shared::new(paths, cfg, None, dry_run, true);
+    *sh.opener.lock().unwrap() = Some(open_url);
     let _ = SHARED.set(sh.clone());
     // Lets `mkworker status` / `mkworker stop` see the tray's worker too.
     let pid_file = sh.paths.pid_file();
