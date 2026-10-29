@@ -12,13 +12,13 @@ Get the latest build from [Releases](../../releases):
 - Windows: `mkworker-tray.exe` (tray app) and `mkworker.exe` (command line)
 - Linux: `mkworker-linux-x86_64` (static, no dependencies)
 
-You need a worker token (`mkw_...`) from the site.
+Connect it to the site by approving a code (below); it updates itself from new releases
+(`auto_update = false` in the config turns that off, `mkworker update` updates now).
 
 ## Windows
 
-1. Copy the token.
-2. Run `mkworker-tray.exe`, right-click the tray icon, **Set token from clipboard**.
-3. Pick a mode. Tick **Start with Windows** if you want it always on.
+1. Run `mkworker-tray.exe`, click the tray icon, then **Connect to site** and approve the code on the site.
+2. Pick a mode. Turn on **Start with Windows** if you want it always on.
 
 Green = working, amber = paused or YouTube cooldown, grey = off, red = token or connection problem.
 
@@ -26,7 +26,7 @@ Green = working, amber = paused or YouTube cooldown, grey = off, red = token or 
 
 ```sh
 chmod +x mkworker-linux-x86_64 && mv mkworker-linux-x86_64 ~/mkworker
-echo 'mkw_...' | ~/mkworker token set
+~/mkworker pair                    # approve the code it shows on the site
 ~/mkworker run --daemon --mode max --threads 2   # log: ~/.local/state/mkworker/log
 ~/mkworker status
 ~/mkworker stop

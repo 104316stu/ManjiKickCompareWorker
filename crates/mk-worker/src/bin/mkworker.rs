@@ -5,6 +5,8 @@
 //!   mkworker status [--json]
 //!   mkworker stop
 //!   mkworker token set        (reads the token from stdin)
+//!   mkworker pair [--name N]  (connect to the site by approving a code)
+//!   mkworker update
 
 use mkworker::config::{Config, Mode};
 use mkworker::engine::{Engine, Shared};
@@ -27,7 +29,9 @@ usage:
       --dry-run              lease jobs and hand them back, post nothing
   mkworker status [--json]   what the running worker is doing
   mkworker stop              stop the running worker
+  mkworker pair [--name N]   connect to the site: approve a code there (default name: hostname)
   mkworker token set         save the token read from stdin
+  mkworker update            install the latest release now
   mkworker test-download ID  check yt-dlp + ffmpeg here with one YouTube video
   mkworker version";
 
@@ -48,9 +52,16 @@ fn die(msg: &str) -> ! {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if cfg!(windows) {
+        mkworker::update::set_asset("mkworker.exe");
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        mkworker::update::set_asset("mkworker-linux-x86_64");
+    }
     let paths = Paths::get();
     match args.first().map(String::as_str) {
         Some("run") => run(&paths, &args[1..]),
+        Some("pair") => pair(&paths, &args[1..]),
+        Some("update") => update_now(),
         Some("status") => status(&paths, args.iter().any(|a| a == "--json")),
         Some("stop") => stop(&paths),
         Some("test-download") => test_download(&paths, args.get(1)),
@@ -60,6 +71,54 @@ fn main() {
         }
         Some("help") | Some("--help") | Some("-h") | None => println!("{USAGE}"),
         Some(other) => die(&format!("unknown command '{other}'\n\n{USAGE}")),
+    }
+}
+
+fn pair(paths: &Paths, args: &[String]) {
+    let mut name = mkworker::pair::hostname();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--name" => {
+                i += 1;
+                name = args.get(i).cloned().unwrap_or_else(|| die("--name needs a value"));
+            }
+            a if a.starts_with("--name=") => name = a["--name=".len()..].to_string(),
+            a => die(&format!("unknown option '{a}'")),
+        }
+        i += 1;
+    }
+    paths.create_all();
+    platform::install_stop_handler();
+    let server = Config::load(&paths.config_file()).server;
+    let started = mkworker::pair::start(&server, &name).unwrap_or_else(|e| die(&e));
+    println!("Open this page and approve the code:\n\n  {}\n\n  code: {}\n", started.approve_url, started.code);
+    platform::open_url(&started.approve_url);
+    println!("waiting for approval (Ctrl+C to cancel)...");
+    match mkworker::pair::wait(&server, &started, &platform::stop_requested) {
+        Ok(mkworker::pair::Outcome::Approved(token)) => match paths.write_token(&token) {
+            Ok(()) => println!("connected as '{name}'; token saved to {}", paths.token_file().display()),
+            Err(e) => die(&format!("approved, but the token could not be saved: {e}")),
+        },
+        Ok(mkworker::pair::Outcome::Denied) => die("denied on the site"),
+        Ok(mkworker::pair::Outcome::Expired) => die("the code expired; run `mkworker pair` again"),
+        Ok(mkworker::pair::Outcome::Cancelled) => die("cancelled"),
+        Err(e) => die(&e),
+    }
+}
+
+fn update_now() {
+    let exe = std::env::current_exe().unwrap_or_else(|e| die(&e.to_string()));
+    mkworker::update::clean_old();
+    match mkworker::update::check() {
+        Ok(None) => println!("up to date ({})", mkworker::VERSION),
+        Ok(Some(rel)) => {
+            println!("downloading {}...", rel.tag);
+            let file = mkworker::update::download(&rel, &exe).unwrap_or_else(|e| die(&e));
+            mkworker::update::swap(&exe, &file).unwrap_or_else(|e| die(&e));
+            println!("updated to {}; restart a running worker to use it", rel.tag);
+        }
+        Err(e) => die(&e),
     }
 }
 
@@ -225,7 +284,7 @@ fn run(paths: &Paths, args: &[String]) {
     mkworker::logging::init(&paths.log_file, !background && !fg_status);
 
     // One worker per user: a mutex on Windows, a locked pid file on Unix.
-    let _instance = platform::single_instance().unwrap_or_else(|| die("another worker is already running"));
+    let _instance = platform::single_instance_after_update().unwrap_or_else(|| die("another worker is already running"));
     #[cfg(unix)]
     let pid_lock = platform::lock_pid_file(&paths.pid_file())
         .unwrap_or_else(|| die("another worker is already running; `mkworker stop` first"));
@@ -258,6 +317,22 @@ fn run(paths: &Paths, args: &[String]) {
     Engine::new(shared.clone()).run(Some(Duration::from_secs(60)));
     mkworker::log!("stopped");
     // A rejected token ends the CLI with an error so a supervisor notices.
+    if shared.st.lock().unwrap().restart {
+        // A new release is in place: become it (same arguments).
+        if let Some(p) = OWN_PID_FILE.lock().ok().and_then(|mut g| g.take()) {
+            if cfg!(windows) {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        let exe = std::env::current_exe().unwrap_or_else(|e| die(&e.to_string()));
+        match mkworker::update::relaunch(&exe) {
+            Ok(()) => exit(0),
+            Err(e) => {
+                mkworker::log!("{e}");
+                exit(1);
+            }
+        }
+    }
     let rejected = matches!(shared.st.lock().unwrap().phase, mkworker::engine::Phase::TokenRejected(_));
     exit(if rejected { 3 } else { 0 });
 }

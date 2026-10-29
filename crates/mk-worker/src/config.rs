@@ -12,6 +12,7 @@
 //!   ytdlp = auto                 # auto (pinned download) | system | <path>
 //!   ffmpeg = auto
 //!   deno = auto                  # also: none
+//!   auto_update = true           # install new releases by itself
 
 use std::path::Path;
 
@@ -114,6 +115,7 @@ pub struct Config {
     pub ytdlp: String,
     pub ffmpeg: String,
     pub deno: String,
+    pub auto_update: bool,
 }
 
 impl Default for Config {
@@ -131,6 +133,7 @@ impl Default for Config {
             ytdlp: "auto".into(),
             ffmpeg: "auto".into(),
             deno: "auto".into(),
+            auto_update: true,
         }
     }
 }
@@ -165,6 +168,7 @@ impl Config {
                 "ytdlp" | "yt-dlp" => c.ytdlp = v.to_string(),
                 "ffmpeg" => c.ffmpeg = v.to_string(),
                 "deno" => c.deno = v.to_string(),
+                "auto_update" => c.auto_update = truthy(v),
                 _ => {}
             }
         }
@@ -180,9 +184,9 @@ impl Config {
              server = {}\nmode = {}\nthreads = {}\nduty = {}\nmax_video_seconds = {}\nrunning = {}\n\
              pause_fullscreen = {}\npause_battery = {}\n\
              # auto = download the pinned build; system = use the one on PATH; or a full path\n\
-             ytdlp = {}\nffmpeg = {}\ndeno = {}\n",
+             ytdlp = {}\nffmpeg = {}\ndeno = {}\nauto_update = {}\n",
             self.server, self.mode.key(), self.threads, self.duty, self.max_video_seconds, self.running,
-            self.pause_fullscreen, self.pause_battery, self.ytdlp, self.ffmpeg, self.deno
+            self.pause_fullscreen, self.pause_battery, self.ytdlp, self.ffmpeg, self.deno, self.auto_update
         );
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, text)?;

@@ -10,12 +10,16 @@ pub mod core;
 pub mod engine;
 pub mod job;
 pub mod logging;
+pub mod pair;
 pub mod paths;
 pub mod platform;
 pub mod proc;
 pub mod sidecars;
+pub mod update;
 pub mod zipx;
 
+#[cfg(windows)]
+pub mod popup;
 #[cfg(windows)]
 pub mod tray;
 

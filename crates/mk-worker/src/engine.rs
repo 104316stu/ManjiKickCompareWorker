@@ -29,6 +29,8 @@ pub enum Phase {
     Off,
     Paused(String),
     Cooldown,
+    /// Finishing up to restart into a new release.
+    Updating(String),
     Running,
 }
 
@@ -39,6 +41,27 @@ pub struct Today {
     pub same: u64,
     pub errors: u64,
     pub secs: f64,
+    /// Video audio downloaded.
+    #[serde(default)]
+    pub bytes: u64,
+}
+
+impl Today {
+    fn add(&mut self, verdict: &str, secs: f64) {
+        self.done += 1;
+        self.same += (verdict == "same") as u64;
+        self.errors += (verdict == "unknown") as u64;
+        self.secs += secs;
+    }
+}
+
+/// What the popup shows while pairing.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct Pairing {
+    pub code: Option<String>,
+    pub url: Option<String>,
+    pub message: String,
+    pub active: bool,
 }
 
 pub struct State {
@@ -53,7 +76,17 @@ pub struct State {
     pub cooldown_streak: u32,
     pub half_until: f64,
     pub today: Today,
+    /// Since this machine first ran the worker.
+    pub all: Today,
     pub last: Option<String>,
+    pub pairing: Pairing,
+    /// "Up to date (v0.2.0)", "Updating to v0.2.1", ...
+    pub update_text: String,
+    /// A checked new release waiting to be swapped in: (file, tag).
+    pub update_ready: Option<(std::path::PathBuf, String)>,
+    pub update_checking: bool,
+    /// Set when the engine stopped to restart into the swapped-in program.
+    pub restart: bool,
     pub server_name: Option<String>,
     pub trust: Option<String>,
     pub max_video_seconds: u32,
@@ -84,7 +117,7 @@ impl Shared {
     pub fn new(paths: Paths, cfg: Config, threads_override: Option<usize>, dry_run: bool, interactive: bool) -> Arc<Shared> {
         let cores = config::cores();
         let policy = config::policy(cfg.mode, cores, false);
-        let mut today = load_today(&paths);
+        let (mut today, all) = load_totals(&paths);
         if today.date != platform::local_date() {
             today = Today { date: platform::local_date(), ..Default::default() };
         }
@@ -107,7 +140,13 @@ impl Shared {
                 cooldown_streak: 0,
                 half_until: 0.0,
                 today,
+                all,
                 last: None,
+                pairing: Pairing::default(),
+                update_text: String::new(),
+                update_ready: None,
+                update_checking: false,
+                restart: false,
                 server_name: None,
                 trust: None,
                 max_video_seconds: max_video,
@@ -165,11 +204,12 @@ impl Shared {
         match &st.phase {
             Phase::Starting => "Starting".into(),
             Phase::Setup(s) => format!("Setting up: {s}"),
-            Phase::NoToken => "No token: set one from the clipboard".into(),
+            Phase::NoToken => "Not connected to the site".into(),
             Phase::TokenRejected(s) => format!("Token rejected ({s})"),
             Phase::Offline(s) => format!("Can't reach the site: {s}"),
             Phase::Off => "Off".into(),
             Phase::Paused(r) => format!("Paused: {r}"),
+            Phase::Updating(tag) => format!("Updating to {tag}"),
             Phase::Cooldown => {
                 let mins = ((st.cooldown_until - crate::now()) / 60.0).ceil().max(1.0);
                 format!("YouTube cooldown {mins} min")
@@ -212,7 +252,9 @@ impl Shared {
             "queued": st.queue.len(),
             "cooldown_until": st.cooldown_until,
             "today": st.today,
+            "all": st.all,
             "last": st.last,
+            "update": st.update_text,
             "server": cfg.server,
             "worker_name": st.server_name,
             "trust": st.trust,
@@ -239,11 +281,101 @@ impl Shared {
         if st.today.date != date {
             st.today = Today { date, ..Default::default() };
         }
-        st.today.done += 1;
-        st.today.same += (verdict == "same") as u64;
-        st.today.errors += (verdict == "unknown") as u64;
-        st.today.secs += secs;
+        st.today.add(verdict, secs);
+        st.all.add(verdict, secs);
         st.last = Some(format!("{}: {}", job.video_id, verdict));
+    }
+
+    pub fn add_download(&self, bytes: u64) {
+        let mut st = self.st.lock().unwrap();
+        st.today.bytes += bytes;
+        st.all.bytes += bytes;
+    }
+
+    /// The popup's data: everything it shows, refreshed every second.
+    pub fn popup_json(&self, startup: bool) -> serde_json::Value {
+        let status = self.status_text();
+        let st = self.st.lock().unwrap();
+        let cfg = self.cfg.lock().unwrap();
+        let pill = match &st.phase {
+            Phase::Running => ("Running", "running"),
+            Phase::Paused(_) | Phase::Cooldown => ("Paused", "paused"),
+            Phase::Updating(_) => ("Updating", "busy"),
+            Phase::Off => ("Off", "off"),
+            Phase::NoToken | Phase::TokenRejected(_) => ("Token problem", "error"),
+            Phase::Offline(_) => ("Offline", "error"),
+            Phase::Starting | Phase::Setup(_) => ("Starting", "busy"),
+        };
+        let left = st.cooldown_until - crate::now();
+        let cooldown = if left > 0.0 { format!("{} min", (left / 60.0).ceil()) } else { "none".into() };
+        let tiles = |t: &Today| serde_json::json!({
+            "compared": t.done,
+            "same": t.same,
+            "avg": if t.done > 0 { format!("{:.1} s", t.secs / t.done as f64) } else { "-".into() },
+            "mb": format!("{:.0}", t.bytes as f64 / 1_048_576.0),
+        });
+        serde_json::json!({
+            "pill": pill.0, "kind": pill.1, "status": status,
+            "today": tiles(&st.today), "all": tiles(&st.all),
+            "threads": st.threads, "busy": st.busy, "cooldown": cooldown,
+            "mode": cfg.mode.key(), "running": cfg.running,
+            "pause_fullscreen": cfg.pause_fullscreen, "pause_battery": cfg.pause_battery,
+            "startup": startup, "pairing": st.pairing,
+            "connected": st.server_name.is_some(), "name": st.server_name, "trust": st.trust,
+            "update": st.update_text, "version": env!("CARGO_PKG_VERSION"),
+            "server": cfg.server,
+        })
+    }
+
+    /// Starts pairing in the background: asks the site for a code, opens the
+    /// approve page with `open`, waits, saves the token.
+    pub fn start_pairing(self: &Arc<Self>, name: String, open: fn(&str)) {
+        {
+            let mut st = self.st.lock().unwrap();
+            if st.pairing.active {
+                if let Some(url) = st.pairing.url.clone() {
+                    open(&url);
+                }
+                return;
+            }
+            st.pairing = Pairing { active: true, message: "Asking the site for a code...".into(), ..Default::default() };
+        }
+        let sh = self.clone();
+        std::thread::spawn(move || {
+            let server = sh.cfg.lock().unwrap().server.clone();
+            let set = |f: &dyn Fn(&mut Pairing)| f(&mut sh.st.lock().unwrap().pairing);
+            let started = match crate::pair::start(&server, &name) {
+                Ok(s) => s,
+                Err(e) => {
+                    crate::log!("pairing failed: {e}");
+                    set(&|p| *p = Pairing { message: format!("Couldn't start: {e}"), ..Default::default() });
+                    return;
+                }
+            };
+            crate::log!("pairing: code {} at {}", started.code, started.approve_url);
+            set(&|p| {
+                p.code = Some(started.code.clone());
+                p.url = Some(started.approve_url.clone());
+                p.message = "Approve this code on the site".into();
+            });
+            open(&started.approve_url);
+            let outcome = crate::pair::wait(&server, &started, &|| sh.quitting());
+            let message = match outcome {
+                Ok(crate::pair::Outcome::Approved(token)) => match sh.paths.write_token(&token) {
+                    Ok(()) => {
+                        crate::log!("paired: token saved");
+                        sh.token_changed();
+                        "Connected".to_string()
+                    }
+                    Err(e) => format!("Couldn't save the token: {e}"),
+                },
+                Ok(crate::pair::Outcome::Denied) => "Denied on the site".into(),
+                Ok(crate::pair::Outcome::Expired) => "The code expired; try again".into(),
+                Ok(crate::pair::Outcome::Cancelled) => "Cancelled".into(),
+                Err(e) => format!("Pairing failed: {e}"),
+            };
+            set(&|p| *p = Pairing { message: message.clone(), ..Default::default() });
+        });
     }
 
     /// YouTube refused this machine: back off 60 s, doubling, up to 1 h.
@@ -269,12 +401,13 @@ impl Shared {
     }
 }
 
-fn load_today(paths: &Paths) -> Today {
-    std::fs::read_to_string(paths.status_file())
+fn load_totals(paths: &Paths) -> (Today, Today) {
+    let v: serde_json::Value = std::fs::read_to_string(paths.status_file())
         .ok()
-        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-        .and_then(|v| serde_json::from_value(v["today"].clone()).ok())
-        .unwrap_or_default()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    let get = |k: &str| serde_json::from_value(v[k].clone()).unwrap_or_default();
+    (get("today"), get("all"))
 }
 
 /// Machine load sampler for Light's "PC busy" pause and Linux's Auto.
@@ -338,6 +471,10 @@ impl Engine {
         let mut sensed = (false, false, false, false); // fullscreen, battery, free, busy
         let mut priority_idle: Option<bool> = None;
         let mut last_phase = Phase::Starting;
+        // The first check waits a minute so a fresh start settles first.
+        let mut next_update = crate::now() + 60.0;
+        crate::update::clean_old();
+        sh.st.lock().unwrap().update_text = format!("Up to date (v{})", env!("CARGO_PKG_VERSION"));
 
         while !sh.quitting() {
             let now = crate::now();
@@ -417,6 +554,55 @@ impl Engine {
                         }
                     }
                 }
+            }
+
+            // Updates: never without a token or while pairing.
+            {
+                let auto = sh.cfg.lock().unwrap().auto_update;
+                let mut st = sh.st.lock().unwrap();
+                let blocked = st.pairing.active || sh.paths.read_token().is_none() || sh.dry_run;
+                if !auto {
+                    st.update_text = format!("Updates off (v{})", env!("CARGO_PKG_VERSION"));
+                } else if now >= next_update && !blocked && !st.update_checking && st.update_ready.is_none()
+                    && crate::update::asset().is_some()
+                {
+                    next_update = now + crate::update::CHECK_EVERY;
+                    st.update_checking = true;
+                    let s2 = sh.clone();
+                    std::thread::spawn(move || check_for_update(&s2));
+                }
+            }
+            let ready = {
+                let st = sh.st.lock().unwrap();
+                if st.pairing.active { None } else { st.update_ready.clone() }
+            };
+            if let Some((file, tag)) = ready {
+                sh.st.lock().unwrap().phase = Phase::Updating(tag.clone());
+                if let Some(a) = &api {
+                    let back: Vec<Job> = std::mem::take(&mut sh.st.lock().unwrap().queue);
+                    a.release(&back);
+                }
+                if sh.st.lock().unwrap().busy == 0 {
+                    match std::env::current_exe().map_err(|e| e.to_string())
+                        .and_then(|exe| crate::update::swap(&exe, &file))
+                    {
+                        Ok(()) => {
+                            crate::log!("installed {tag}; restarting into it");
+                            sh.st.lock().unwrap().restart = true;
+                            break;
+                        }
+                        Err(e) => {
+                            crate::log!("update to {tag} failed: {e}");
+                            let _ = std::fs::remove_file(&file);
+                            let mut st = sh.st.lock().unwrap();
+                            st.update_ready = None;
+                            st.update_text = format!("Update failed (v{})", env!("CARGO_PKG_VERSION"));
+                            st.phase = Phase::Starting;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(500));
+                continue;
             }
 
             // The CLI stops on a rejected token (the tray waits for a new one).
@@ -567,6 +753,31 @@ impl Engine {
             if h.is_finished() {
                 let _ = h.join();
             }
+        }
+    }
+}
+
+fn check_for_update(sh: &Shared) {
+    let result = crate::update::check().and_then(|found| match found {
+        None => Ok(None),
+        Some(rel) => {
+            crate::log!("new release {}: downloading", rel.tag);
+            sh.st.lock().unwrap().update_text = format!("Downloading {}", rel.tag);
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            crate::update::download(&rel, &exe).map(|file| Some((file, rel.tag)))
+        }
+    });
+    let mut st = sh.st.lock().unwrap();
+    st.update_checking = false;
+    match result {
+        Ok(Some((file, tag))) => {
+            st.update_text = format!("Updating to {tag}");
+            st.update_ready = Some((file, tag));
+        }
+        Ok(None) => st.update_text = format!("Up to date (v{})", env!("CARGO_PKG_VERSION")),
+        Err(e) => {
+            crate::log!("{e}");
+            st.update_text = format!("Update check failed (v{})", env!("CARGO_PKG_VERSION"));
         }
     }
 }

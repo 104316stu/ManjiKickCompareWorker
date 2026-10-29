@@ -105,6 +105,7 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
     match dl {
         Download::Ok(path) => {
             sh.youtube_ok();
+            sh.add_download(std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0));
             let t = Instant::now();
             let decoded = crate::core::decode_file(&tools.ffmpeg, &path, max_video as f64);
             let _ = std::fs::remove_dir_all(&folder);

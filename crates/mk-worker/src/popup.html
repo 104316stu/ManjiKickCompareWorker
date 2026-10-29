@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="dark">
+<style>
+  :root {
+    --panel: #1b1f24;
+    --tile: #22272e;
+    --tile-line: #2d333b;
+    --line: #2a3038;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --faint: #6e7681;
+    --accent: #4c9aff;
+    --green: #3fb950;
+    --amber: #d29922;
+    --grey: #8b949e;
+    --red: #f85149;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: var(--panel); color: var(--text);
+    font: 13px/1.35 "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    user-select: none; overflow: hidden; cursor: default;
+  }
+  .panel { display: grid; grid-template-columns: 1fr 236px; grid-template-rows: 1fr auto; height: 100%; }
+  .left { padding: 14px 14px 10px 16px; display: flex; flex-direction: column; min-width: 0; }
+  .right { border-left: 1px solid var(--line); padding: 12px 14px 8px; display: flex; flex-direction: column; gap: 9px; min-height: 0; }
+
+  .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .logo { width: 22px; height: 22px; flex: none; }
+  .logo svg { width: 22px; height: 22px; display: block; }
+  .title { font-weight: 600; font-size: 14px; letter-spacing: .1px; }
+  .tabs { margin-left: auto; display: flex; gap: 2px; background: var(--tile); border: 1px solid var(--tile-line); border-radius: 7px; padding: 2px; }
+  .tab { border: 0; background: none; color: var(--muted); font: inherit; padding: 3px 10px; border-radius: 5px; }
+  .tab[aria-selected="true"] { background: #2f363f; color: var(--text); }
+
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  .tile { background: var(--tile); border: 1px solid var(--tile-line); border-radius: 10px; padding: 10px 11px 9px; min-width: 0; }
+  .tile .lab { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .tile .lab svg { width: 14px; height: 14px; stroke: var(--muted); fill: none; stroke-width: 1.6; flex: none; }
+  .tile .num { font-size: 22px; font-weight: 600; margin-top: 6px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tile .num small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 2px; }
+
+  .status { margin-top: 10px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .foot { grid-column: 1 / -1; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 11.5px; padding: 6px 10px 6px 16px; }
+  .foot .upd { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .pill { align-self: flex-end; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid; }
+  .pill i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .pill.running { color: var(--green); border-color: #2a4f35; background: #1d2b22; }
+  .pill.paused { color: var(--amber); border-color: #4d3d17; background: #2b261a; }
+  .pill.off { color: var(--grey); border-color: #383f47; background: #23282e; }
+  .pill.error { color: var(--red); border-color: #5a2a29; background: #2d1f20; }
+  .pill.busy { color: var(--accent); border-color: #24405f; background: #1c2633; }
+
+  .sect { color: var(--faint); font-size: 11px; text-transform: none; margin-bottom: 4px; }
+  .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  .mode { border: 1px solid var(--tile-line); background: var(--tile); color: var(--muted); font: inherit; font-size: 11.5px; padding: 5px 0; border-radius: 6px; }
+  .mode:hover { color: var(--text); }
+  .mode[aria-pressed="true"] { background: #23344a; border-color: #2f5b8f; color: #cfe3ff; }
+
+  .toggles { display: flex; flex-direction: column; gap: 2px; }
+  .tog { display: flex; align-items: center; justify-content: space-between; padding: 4px 2px; color: var(--text); font-size: 12.5px; border-radius: 6px; }
+  .tog:hover { background: #222830; }
+  .sw { width: 28px; height: 16px; border-radius: 8px; background: #3a414a; position: relative; flex: none; transition: background .12s; }
+  .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #c9d1d9; transition: transform .12s; }
+  .tog[aria-checked="true"] .sw { background: #2f6fb8; }
+  .tog[aria-checked="true"] .sw::after { transform: translateX(12px); background: #fff; }
+
+  .links { border-top: 1px solid var(--line); padding-top: 6px; display: flex; flex-direction: column; }
+  .link { display: flex; align-items: center; gap: 8px; padding: 5px 2px; color: var(--text); font-size: 12.5px; border-radius: 6px; }
+  .link:hover { background: #222830; }
+  .link svg { width: 15px; height: 15px; stroke: var(--muted); fill: none; stroke-width: 1.6; flex: none; }
+  .link .sub { margin-left: auto; color: var(--faint); font-size: 11px; }
+  .pair { background: var(--tile); border: 1px solid var(--tile-line); border-radius: 8px; padding: 7px 9px; margin-top: 4px; font-size: 12px; color: var(--muted); }
+  .pair b { display: block; color: var(--text); font-size: 18px; letter-spacing: 1.5px; font-variant-numeric: tabular-nums; margin: 2px 0; }
+  .power { margin-left: auto; width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--tile-line); background: var(--tile); display: grid; place-items: center; }
+  .power:hover { border-color: #5a2a29; }
+  .power svg { width: 14px; height: 14px; stroke: var(--muted); fill: none; stroke-width: 1.8; }
+  .power:hover svg { stroke: var(--red); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="panel">
+  <section class="left">
+    <div class="head">
+      <span class="logo" id="logo"><!--logo--></span>
+      <span class="title">ManjiKick worker</span>
+      <div class="tabs" role="tablist">
+        <button class="tab" role="tab" data-tab="today" aria-selected="true">Today</button>
+        <button class="tab" role="tab" data-tab="all" aria-selected="false">All time</button>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="tile"><div class="lab"><svg viewBox="0 0 16 16"><path d="M2 8h3l2-5 2 10 2-5h3"/></svg>Compared</div><div class="num" id="t-compared">0</div></div>
+      <div class="tile"><div class="lab"><svg viewBox="0 0 16 16"><path d="M3 8.5 6.5 12 13 4.5"/></svg>Same</div><div class="num" id="t-same">0</div></div>
+      <div class="tile"><div class="lab"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5"/><path d="M8 5v3.2l2 1.3"/></svg>Avg time</div><div class="num" id="t-avg">-</div></div>
+      <div class="tile"><div class="lab"><svg viewBox="0 0 16 16"><rect x="3" y="3" width="10" height="10" rx="1.5"/><path d="M6 1v2M10 1v2M6 13v2M10 13v2M1 6h2M1 10h2M13 6h2M13 10h2"/></svg>Threads</div><div class="num" id="t-threads">0</div></div>
+      <div class="tile"><div class="lab"><svg viewBox="0 0 16 16"><path d="M8 2v8M4.5 6.5 8 10l3.5-3.5M3 13h10"/></svg>Downloaded</div><div class="num"><span id="t-mb">0</span><small>MB</small></div></div>
+      <div class="tile"><div class="lab"><svg viewBox="0 0 16 16"><path d="M5 2h6M5 14h6M5.5 2c0 3.5 5 4.5 5 6s-5 2.5-5 6M10.5 2c0 3.5-5 4.5-5 6"/></svg>Cooldown</div><div class="num" id="t-cool">none</div></div>
+    </div>
+    <div class="status" id="status">Starting</div>
+  </section>
+
+  <section class="right">
+    <span class="pill busy" id="pill"><i></i><span id="pill-text">Starting</span></span>
+    <div>
+      <div class="sect">Effort</div>
+      <div class="modes">
+        <button class="mode" data-mode="light" title="One compare at a time, stays out of the way">Light</button>
+        <button class="mode" data-mode="balanced" title="Half the cores">Balanced</button>
+        <button class="mode" data-mode="max" title="All cores but one">Max</button>
+        <button class="mode" data-mode="auto" title="Max while you're away, Light while you use the PC">Auto</button>
+      </div>
+    </div>
+    <div class="toggles">
+      <div class="tog" role="switch" data-toggle="running" aria-checked="true">Working<span class="sw"></span></div>
+      <div class="tog" role="switch" data-toggle="pause_fullscreen" aria-checked="true">Pause for games<span class="sw"></span></div>
+      <div class="tog" role="switch" data-toggle="pause_battery" aria-checked="false">Pause on battery<span class="sw"></span></div>
+      <div class="tog" role="switch" data-toggle="startup" aria-checked="false">Start with Windows<span class="sw"></span></div>
+    </div>
+    <div class="links">
+      <div class="link" data-open="site"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg>Open the site</div>
+      <div class="link" data-open="logs"><svg viewBox="0 0 16 16"><path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/></svg>Open log folder</div>
+      <div class="link" id="pair-link"><svg viewBox="0 0 16 16"><path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.8 2.8 0 0 1 4 4l-1 1M9 11.5l-1 1a2.8 2.8 0 0 1-4-4l1-1"/></svg><span id="pair-label">Connect to site</span><span class="sub" id="pair-sub"></span></div>
+      <div class="pair" id="pair-box" hidden><span id="pair-msg"></span><b id="pair-code"></b></div>
+    </div>
+  </section>
+  <footer class="foot">
+    <span id="version">v0.0.0</span><span>·</span><span class="upd" id="update"></span>
+    <button class="power" id="quit" title="Quit the worker"><svg viewBox="0 0 16 16"><path d="M8 2v6M4.6 4.2a5 5 0 1 0 6.8 0"/></svg></button>
+  </footer>
+</div>
+<script>
+  const send = (cmd, value) => window.chrome.webview.postMessage(JSON.stringify({ cmd, value }));
+  let tab = "today", last = null;
+  const $ = id => document.getElementById(id);
+
+  document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+    tab = b.dataset.tab;
+    document.querySelectorAll(".tab").forEach(x => x.setAttribute("aria-selected", x === b));
+    if (last) render(last);
+  });
+  document.querySelectorAll(".mode").forEach(b => b.onclick = () => send("mode", b.dataset.mode));
+  document.querySelectorAll(".tog").forEach(t => t.onclick = () => {
+    t.setAttribute("aria-checked", t.getAttribute("aria-checked") !== "true");
+    send("toggle", t.dataset.toggle);
+  });
+  document.querySelectorAll("[data-open]").forEach(l => l.onclick = () => send("open", l.dataset.open));
+  $("pair-link").onclick = () => send("pair");
+  $("quit").onclick = () => send("quit");
+  document.addEventListener("keydown", e => { if (e.key === "Escape") send("hide"); });
+  document.addEventListener("contextmenu", e => e.preventDefault());
+
+  function render(d) {
+    last = d;
+    const t = d[tab];
+    $("t-compared").textContent = t.compared.toLocaleString();
+    $("t-same").textContent = t.same.toLocaleString();
+    $("t-avg").textContent = t.avg;
+    $("t-mb").textContent = Number(t.mb).toLocaleString();
+    $("t-threads").textContent = d.threads;
+    $("t-cool").textContent = d.cooldown;
+    $("status").textContent = d.status;
+    $("version").textContent = "v" + d.version;
+    $("update").textContent = d.update || "";
+    const pill = $("pill");
+    pill.className = "pill " + d.kind;
+    $("pill-text").textContent = d.pill;
+    document.querySelectorAll(".mode").forEach(b => b.setAttribute("aria-pressed", b.dataset.mode === d.mode));
+    document.querySelectorAll(".tog").forEach(x => x.setAttribute("aria-checked", !!d[x.dataset.toggle]));
+    const p = d.pairing || {};
+    $("pair-label").textContent = d.connected ? "Connect again" : "Connect to site";
+    $("pair-sub").textContent = d.connected && d.name ? d.name : "";
+    const show = p.active || !!p.message;
+    $("pair-box").hidden = !show;
+    $("pair-msg").textContent = p.message || "";
+    $("pair-code").textContent = p.code || "";
+    $("pair-code").hidden = !p.code;
+  }
+  window.chrome.webview.addEventListener("message", e => render(e.data));
+  send("ready");
+</script>
+</body>
+</html>

@@ -351,6 +351,38 @@ mod imp {
 
 pub use imp::*;
 
+/// single_instance(), but right after a self-update the previous program may
+/// still be exiting: wait for it up to 30 s.
+pub fn single_instance_after_update() -> Option<Instance> {
+    let updated = std::env::var_os("MKW_UPDATED").is_some();
+    for _ in 0..60 {
+        if let Some(i) = single_instance() {
+            return Some(i);
+        }
+        if !updated {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    None
+}
+
+/// Opens a web page in the default browser (best effort).
+pub fn open_url(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        let _ = crate::proc::quiet(std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url])).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    }
+}
+
 pub fn local_date() -> String {
     let (y, m, d, ..) = local_parts();
     format!("{y:04}-{m:02}-{d:02}")

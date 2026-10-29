@@ -1,5 +1,6 @@
-//! The Windows tray app: a notification-area icon coloured by state and a
-//! right-click menu. Plain Win32; the engine runs on its own thread.
+//! The Windows tray app: a notification-area icon coloured by state, a
+//! popup panel on left-click (popup.rs) and a right-click menu. Plain Win32;
+//! the engine runs on its own thread.
 
 use crate::config::{Config, Mode};
 use crate::engine::{Engine, Phase, Shared};
@@ -27,6 +28,8 @@ const ID_PAUSE_BATTERY: u32 = 31;
 const ID_STARTUP: u32 = 32;
 const ID_TOKEN: u32 = 40;
 const ID_LOGS: u32 = 41;
+const ID_PAIR: u32 = 42;
+const ID_SITE: u32 = 43;
 const ID_QUIT: u32 = 50;
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -65,41 +68,24 @@ fn look() -> Look {
         Phase::Paused(_) | Phase::Cooldown => Look::Amber,
         Phase::Off => Look::Grey,
         Phase::NoToken | Phase::TokenRejected(_) | Phase::Offline(_) => Look::Red,
-        Phase::Starting | Phase::Setup(_) => Look::Blue,
+        Phase::Starting | Phase::Setup(_) | Phase::Updating(_) => Look::Blue,
     }
 }
 
-/// A 32x32 disc with a darker rim, drawn in code.
+/// The state icons from assets/ (16 and 32 px PNGs, picked by the system's
+/// small-icon size). Windows reads PNG icon images directly.
 fn make_icon(look: Look) -> HICON {
-    let (r, g, b) = match look {
-        Look::Green => (0x3f, 0xb9, 0x50),
-        Look::Amber => (0xe3, 0xa0, 0x08),
-        Look::Grey => (0x8b, 0x94, 0x9e),
-        Look::Red => (0xf8, 0x51, 0x49),
-        Look::Blue => (0x58, 0xa6, 0xff),
+    let (small, large): (&[u8], &[u8]) = match look {
+        Look::Green => (include_bytes!("../../../assets/tray-running-16.png"), include_bytes!("../../../assets/tray-running-32.png")),
+        Look::Amber | Look::Blue => (include_bytes!("../../../assets/tray-paused-16.png"), include_bytes!("../../../assets/tray-paused-32.png")),
+        Look::Grey => (include_bytes!("../../../assets/tray-off-16.png"), include_bytes!("../../../assets/tray-off-32.png")),
+        Look::Red => (include_bytes!("../../../assets/tray-error-16.png"), include_bytes!("../../../assets/tray-error-32.png")),
     };
-    const N: usize = 32;
-    let mut bgra = vec![0u8; N * N * 4];
-    let c = (N as f32 - 1.0) / 2.0;
-    for y in 0..N {
-        for x in 0..N {
-            let d = ((x as f32 - c).powi(2) + (y as f32 - c).powi(2)).sqrt();
-            let alpha = (14.5 - d).clamp(0.0, 1.0);
-            if alpha <= 0.0 {
-                continue;
-            }
-            let rim = if d > 11.5 { 0.72 } else { 1.0 };
-            let i = (y * N + x) * 4;
-            let a = alpha;
-            // Premultiplied BGRA.
-            bgra[i] = (b as f32 * rim * a) as u8;
-            bgra[i + 1] = (g as f32 * rim * a) as u8;
-            bgra[i + 2] = (r as f32 * rim * a) as u8;
-            bgra[i + 3] = (255.0 * a) as u8;
-        }
+    unsafe {
+        let want = GetSystemMetrics(SM_CXSMICON);
+        let png = if want > 16 { large } else { small };
+        CreateIconFromResourceEx(png.as_ptr(), png.len() as u32, 1, 0x0003_0000, want, want, LR_DEFAULTCOLOR)
     }
-    let mask = vec![0u8; N * N / 8];
-    unsafe { CreateIcon(GetModuleHandleW(std::ptr::null()), N as i32, N as i32, 1, 32, mask.as_ptr(), bgra.as_ptr()) }
 }
 
 struct Icons {
@@ -275,7 +261,9 @@ fn show_menu(hwnd: HWND) {
         add(menu, ID_PAUSE_BATTERY, "Pause on battery", cfg.pause_battery, true);
         add(menu, ID_STARTUP, "Start with Windows", startup_value().is_some(), true);
         separator(menu);
+        add(menu, ID_PAIR, "Connect to site", false, true);
         add(menu, ID_TOKEN, "Set token from clipboard", false, true);
+        add(menu, ID_SITE, "Open the site", false, true);
         add(menu, ID_LOGS, "Open log folder", false, true);
         separator(menu);
         add(menu, ID_QUIT, "Quit", false, true);
@@ -317,23 +305,79 @@ fn command(hwnd: HWND, id: u32) {
         ID_LOGS => {
             let _ = std::process::Command::new("explorer.exe").arg(sh.paths.log_dir()).spawn();
         }
+        ID_SITE => open_url(&sh.cfg.lock().unwrap().server.clone()),
+        ID_PAIR => sh.start_pairing(crate::pair::hostname(), open_url),
         ID_QUIT => unsafe { PostQuitMessage(0) },
         _ => {}
     }
     notify(hwnd, NIM_MODIFY, None);
+    crate::popup::refresh(popup_state());
+}
+
+/// Opens a web page in the default browser.
+pub fn open_url(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return;
+    }
+    unsafe {
+        ShellExecuteW(std::ptr::null_mut(), wide("open").as_ptr(), wide(url).as_ptr(), std::ptr::null(),
+            std::ptr::null(), SW_SHOWNORMAL);
+    }
+}
+
+fn popup_state() -> String {
+    shared().popup_json(startup_value().is_some()).to_string()
+}
+
+/// A click in the popup.
+fn popup_command(cmd: &str, value: &str) {
+    let hwnd = TRAY_HWND.with(|h| h.get());
+    let id = match (cmd, value) {
+        ("mode", "auto") => ID_MODE_AUTO,
+        ("mode", "light") => ID_MODE_LIGHT,
+        ("mode", "balanced") => ID_MODE_BALANCED,
+        ("mode", "max") => ID_MODE_MAX,
+        ("toggle", "running") => ID_RUNNING,
+        ("toggle", "pause_fullscreen") => ID_PAUSE_FULLSCREEN,
+        ("toggle", "pause_battery") => ID_PAUSE_BATTERY,
+        ("toggle", "startup") => ID_STARTUP,
+        ("open", "logs") => ID_LOGS,
+        ("open", "site") => ID_SITE,
+        ("pair", _) => ID_PAIR,
+        ("quit", _) => ID_QUIT,
+        _ => 0,
+    };
+    if id == 0 {
+        crate::popup::refresh(popup_state());
+        return;
+    }
+    if id == ID_LOGS || id == ID_SITE || id == ID_QUIT {
+        crate::popup::hide();
+    }
+    command(hwnd, id);
+}
+
+thread_local! {
+    static TRAY_HWND: std::cell::Cell<HWND> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_TRAY => {
             let event = (lparam & 0xffff) as u32;
-            if event == WM_RBUTTONUP || event == WM_LBUTTONUP || event == WM_CONTEXTMENU {
+            if event == WM_LBUTTONUP {
+                if !crate::popup::toggle() {
+                    show_menu(hwnd);
+                }
+            } else if event == WM_RBUTTONUP || event == WM_CONTEXTMENU {
+                crate::popup::hide();
                 show_menu(hwnd);
             }
             0
         }
         WM_TIMER => {
             notify(hwnd, NIM_MODIFY, None);
+            crate::popup::tick(popup_state);
             if shared().quitting() {
                 PostQuitMessage(0);
             }
@@ -349,10 +393,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 }
 
 pub fn main() {
+    // `--version`: the self-update tries a new build this way before using it.
+    if std::env::args().any(|a| a == "--version" || a == "version") {
+        println!("mkworker-tray {}", crate::VERSION);
+        return;
+    }
+    crate::update::set_asset("mkworker-tray.exe");
+    unsafe {
+        // Sharp text and a correctly sized popup on scaled displays.
+        windows_sys::Win32::UI::HiDpi::SetProcessDpiAwarenessContext(-4isize as _);
+    }
     let paths = Paths::get();
     paths.create_all();
     crate::logging::init(&paths.log_file, false);
-    let Some(_instance) = crate::platform::single_instance() else {
+    let Some(_instance) = crate::platform::single_instance_after_update() else {
         unsafe {
             MessageBoxW(std::ptr::null_mut(), wide("The ManjiKick worker is already running (see the tray).").as_ptr(),
                 wide("ManjiKick worker").as_ptr(), MB_OK | MB_ICONINFORMATION);
@@ -404,9 +458,11 @@ pub fn main() {
         RegisterClassW(&wc);
         let hwnd = CreateWindowExW(0, class.as_ptr(), wide("ManjiKick worker").as_ptr(), 0, 0, 0, 0, 0,
             std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null());
+        TRAY_HWND.with(|h| h.set(hwnd));
         notify(hwnd, NIM_ADD, None);
+        crate::popup::init(hwnd, sh.paths.state_dir.join("webview"), popup_command);
         if sh.paths.read_token().is_none() {
-            notify(hwnd, NIM_MODIFY, Some(("ManjiKick worker", "Copy your mkw_ token, then right-click here: Set token from clipboard.")));
+            notify(hwnd, NIM_MODIFY, Some(("ManjiKick worker", "Click here, then Connect to site.")));
         }
         SetTimer(hwnd, TIMER_ID, 1000, None);
         let mut msg: MSG = std::mem::zeroed();
@@ -424,4 +480,11 @@ pub fn main() {
         remove_icon(hwnd);
     }
     let _ = std::fs::remove_file(pid_file);
+    if sh.st.lock().unwrap().restart {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Err(e) = crate::update::relaunch(&exe) {
+                crate::log!("{e}");
+            }
+        }
+    }
 }

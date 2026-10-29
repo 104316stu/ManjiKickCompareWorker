@@ -1,6 +1,6 @@
 [package]
 name = "mk-worker"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "ManjiKick compare worker: leases audio compares from audios.manjikick.com and runs them here"
 
@@ -37,9 +37,15 @@ native-tls = "0.2"
 # schannel 0.1.28+ moved to windows-sys 0.61 (raw-dylib), which the GNU
 # toolchain can only link with a full binutils; 0.1.27 is the same API.
 schannel = ">=0.1.23, <0.1.28"
+# The popup panel. 0.35 is the last line on windows 0.59, which links with
+# import libraries (later ones need raw-dylib).
+webview2-com = "0.35"
+windows = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT"] }
+windows-core = "0.59"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_Console",
     "Win32_System_DataExchange",
@@ -50,10 +56,14 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
 
 [target.'cfg(unix)'.dependencies]
 ureq = { version = "2.12", default-features = false, features = ["tls"] }
