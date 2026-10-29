@@ -50,12 +50,18 @@ pub fn check() -> Result<Option<Release>, String> {
     let resp = agent
         .get(LATEST_URL)
         .set("Accept", "application/vnd.github+json")
-        .call()
-        .map_err(|e| format!("update check failed: {e}"))?;
+        .call();
+    let resp = match resp {
+        Ok(r) => r,
+        // No release published yet: nothing to update to.
+        Err(ureq::Error::Status(404, _)) => return Ok(None),
+        Err(e) => return Err(format!("update check failed: {e}")),
+    };
     let v: serde_json::Value = serde_json::from_str(&resp.into_string().map_err(|e| e.to_string())?)
         .map_err(|e| format!("update check: bad reply: {e}"))?;
     let tag = v["tag_name"].as_str().unwrap_or("").to_string();
     let Some(latest) = parse_version(&tag) else { return Ok(None) };
+    // Older or the same (e.g. a local build ahead of the releases): stay.
     if latest <= current() {
         return Ok(None);
     }

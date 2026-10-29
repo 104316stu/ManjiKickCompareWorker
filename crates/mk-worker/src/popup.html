@@ -44,6 +44,11 @@
   .tile .num small { font-size: 12px; font-weight: 400; color: var(--muted); margin-left: 2px; }
 
   .status { margin-top: 10px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trust { margin-top: 10px; font-size: 12.5px; }
+  .trust .tlab { color: var(--muted); }
+  .trust b { font-weight: 600; }
+  .trust .who { color: var(--faint); margin-left: 8px; font-size: 11.5px; }
+  .trust .hint { color: var(--faint); font-size: 11.5px; margin-top: 2px; }
   .foot { grid-column: 1 / -1; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 11.5px; padding: 6px 10px 6px 16px; }
   .foot .upd { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -75,9 +80,6 @@
   .link svg { width: 15px; height: 15px; stroke: var(--muted); fill: none; stroke-width: 1.6; flex: none; }
   .link .sub { margin-left: auto; color: var(--faint); font-size: 11px; }
   .pair { background: var(--tile); border: 1px solid var(--tile-line); border-radius: 8px; padding: 7px 9px; margin-top: 4px; font-size: 12px; color: var(--muted); }
-  .pair a { color: var(--accent); cursor: pointer; font-size: 12px; }
-  .pair a:hover { text-decoration: underline; }
-  .pair b { display: block; color: var(--text); font-size: 18px; letter-spacing: 1.5px; font-variant-numeric: tabular-nums; margin: 2px 0; }
   .power { margin-left: auto; width: 26px; height: 26px; border-radius: 7px; border: 1px solid var(--tile-line); background: var(--tile); display: grid; place-items: center; }
   .power:hover { border-color: #5a2a29; }
   .power svg { width: 14px; height: 14px; stroke: var(--muted); fill: none; stroke-width: 1.8; }
@@ -105,6 +107,10 @@
       <div class="tile"><div class="lab"><svg viewBox="0 0 16 16"><path d="M5 2h6M5 14h6M5.5 2c0 3.5 5 4.5 5 6s-5 2.5-5 6M10.5 2c0 3.5-5 4.5-5 6"/></svg>Cooldown</div><div class="num" id="t-cool">none</div></div>
     </div>
     <div class="status" id="status">Starting</div>
+    <div class="trust" id="trust-box" hidden>
+      <div><span class="tlab">Trust</span> <b id="trust"></b><span class="who" id="who"></span></div>
+      <div class="hint" id="trust-hint" hidden>Shadow: only checked against the site. The site owner can trust this PC.</div>
+    </div>
   </section>
 
   <section class="right">
@@ -127,8 +133,6 @@
     <div class="links">
       <div class="link" data-open="site"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M2 8h12M8 2c2 2 2 10 0 12M8 2c-2 2-2 10 0 12"/></svg>Open the site</div>
       <div class="link" data-open="logs"><svg viewBox="0 0 16 16"><path d="M2 4.5h4l1.5 1.5H14v6.5H2z"/></svg>Open log folder</div>
-      <div class="link" id="pair-link"><svg viewBox="0 0 16 16"><path d="M6.5 9.5 9.5 6.5M7 4.5l1-1a2.8 2.8 0 0 1 4 4l-1 1M9 11.5l-1 1a2.8 2.8 0 0 1-4-4l1-1"/></svg><span id="pair-label">Connect to site</span><span class="sub" id="pair-sub"></span></div>
-      <div class="pair" id="pair-box" hidden><span id="pair-msg"></span><b id="pair-code"></b><a id="pair-open" hidden>Open approve page</a></div>
     </div>
   </section>
   <footer class="foot">
@@ -152,8 +156,6 @@
     send("toggle", t.dataset.toggle);
   });
   document.querySelectorAll("[data-open]").forEach(l => l.onclick = () => send("open", l.dataset.open));
-  $("pair-link").onclick = () => send("pair");
-  $("pair-open").onclick = () => send("open", "approve");
   $("quit").onclick = () => send("quit");
   document.addEventListener("keydown", e => { if (e.key === "Escape") send("hide"); });
   document.addEventListener("contextmenu", e => e.preventDefault());
@@ -175,15 +177,10 @@
     $("pill-text").textContent = d.pill;
     document.querySelectorAll(".mode").forEach(b => b.setAttribute("aria-pressed", b.dataset.mode === d.mode));
     document.querySelectorAll(".tog").forEach(x => x.setAttribute("aria-checked", !!d[x.dataset.toggle]));
-    const p = d.pairing || {};
-    $("pair-label").textContent = d.connected ? "Connect again" : "Connect to site";
-    $("pair-sub").textContent = d.connected && d.name ? d.name : "";
-    const show = p.active || !!p.message;
-    $("pair-box").hidden = !show;
-    $("pair-msg").textContent = p.message || "";
-    $("pair-code").textContent = p.code || "";
-    $("pair-code").hidden = !p.code;
-    $("pair-open").hidden = !(p.active && p.url);
+    $("trust-box").hidden = !d.trust;
+    $("trust").textContent = d.trust || "";
+    $("who").textContent = d.name ? "as " + d.name : "";
+    $("trust-hint").hidden = d.trust !== "Shadow";
   }
   window.chrome.webview.addEventListener("message", e => render(e.data));
   send("ready");

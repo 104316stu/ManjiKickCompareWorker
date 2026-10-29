@@ -29,7 +29,7 @@ usage:
       --dry-run              lease jobs and hand them back, post nothing
   mkworker status [--json]   what the running worker is doing
   mkworker stop              stop the running worker
-  mkworker pair [--name N]   connect to the site: approve a code there (default name: hostname)
+  mkworker pair [--name N]   get a token by approving a code on the site (run registers by itself)
   mkworker token set         save the token read from stdin
   mkworker update            install the latest release now
   mkworker test-download ID  check yt-dlp + ffmpeg here with one YouTube video
@@ -290,9 +290,7 @@ fn run(paths: &Paths, args: &[String]) {
         .unwrap_or_else(|| die("another worker is already running; `mkworker stop` first"));
 
     if paths.read_token().is_none() {
-        let msg = format!("no worker token: run `mkworker token set` (or put it in {})", paths.token_file().display());
-        mkworker::log!("{msg}");
-        die(&msg);
+        mkworker::log!("no token yet: this machine registers itself with the site");
     }
 
     // All checks passed: this is the worker now.

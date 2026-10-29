@@ -1,4 +1,5 @@
-//! Pairing: connect this machine to the site without copying a token.
+//! Getting a token. By default a worker registers itself (`register`); the
+//! pairing below (approve a code on the site) is the CLI's `mkworker pair`.
 //! The worker asks for a code, the user approves it on the site (logged in),
 //! and the worker picks up its token once.
 //!
@@ -115,4 +116,37 @@ pub fn wait(server: &str, started: &Started, cancel: &dyn Fn() -> bool) -> Resul
         }
     }
     Ok(Outcome::Expired)
+}
+
+/// Why registering didn't give a token.
+pub enum RegisterError {
+    /// 429: this address made too many workers today.
+    Limited,
+    Other(String),
+}
+
+/// Registers this machine as a new worker (no account step). The site
+/// starts it in shadow. POST /api/worker/v1/register {name, platform}
+/// -> {ok, token, worker_id, trust}.
+pub fn register(server: &str, name: &str) -> Result<String, RegisterError> {
+    let platform = format!("{} {}", crate::os_name(), std::env::consts::ARCH);
+    let agent = crate::api::agent(Duration::from_secs(30));
+    let resp = agent
+        .post(&format!("{}{}/register", server.trim_end_matches('/'), PREFIX))
+        .set("Content-Type", "application/json")
+        .send_string(&json!({"name": name, "platform": platform}).to_string());
+    let resp = match resp {
+        Ok(r) => r,
+        Err(ureq::Error::Status(429, _)) => return Err(RegisterError::Limited),
+        Err(ureq::Error::Status(c, _)) => return Err(RegisterError::Other(format!("the site answered HTTP {c}"))),
+        Err(ureq::Error::Transport(t)) => return Err(RegisterError::Other(format!("can't reach the site: {t}"))),
+    };
+    let text = resp.into_string().map_err(|e| RegisterError::Other(e.to_string()))?;
+    let v: Value = serde_json::from_str(&text).map_err(|e| RegisterError::Other(format!("bad reply: {e}")))?;
+    let token = v["token"].as_str().unwrap_or("").trim().to_string();
+    if token.starts_with("mkw_") && !token.contains(char::is_whitespace) {
+        Ok(token)
+    } else {
+        Err(RegisterError::Other("the site sent no token".into()))
+    }
 }

@@ -55,14 +55,6 @@ impl Today {
     }
 }
 
-/// What the popup shows while pairing.
-#[derive(Clone, Debug, Default, Serialize)]
-pub struct Pairing {
-    pub code: Option<String>,
-    pub url: Option<String>,
-    pub message: String,
-    pub active: bool,
-}
 
 pub struct State {
     pub phase: Phase,
@@ -79,15 +71,15 @@ pub struct State {
     /// Since this machine first ran the worker.
     pub all: Today,
     pub last: Option<String>,
-    pub pairing: Pairing,
     /// "Up to date (v0.2.0)", "Updating to v0.2.1", ...
     pub update_text: String,
     /// A checked new release waiting to be swapped in: (file, tag).
     pub update_ready: Option<(std::path::PathBuf, String)>,
     pub update_checking: bool,
-    /// Automatic pairing (tray): not before this; the browser opens once.
-    pub auto_pair_after: f64,
-    pub pair_browser_opened: bool,
+    /// Registering a new worker: not before this.
+    pub register_after: f64,
+    /// A token worked at least once this run (a later 401/403 is "rejected").
+    pub ever_connected: bool,
     /// Set when the engine stopped to restart into the swapped-in program.
     pub restart: bool,
     pub server_name: Option<String>,
@@ -112,8 +104,6 @@ pub struct Shared {
     pub dry_run: bool,
     /// The tray: battery/fullscreen/busy pauses and the Running toggle apply.
     pub interactive: bool,
-    /// Opens a web page (the tray sets it); enables automatic pairing.
-    pub opener: Mutex<Option<fn(&str)>>,
     pub quit: AtomicBool,
     pub st: Mutex<State>,
 }
@@ -133,7 +123,6 @@ impl Shared {
             threads_override,
             dry_run,
             interactive,
-            opener: Mutex::new(None),
             quit: AtomicBool::new(false),
             st: Mutex::new(State {
                 phase: Phase::Starting,
@@ -148,12 +137,11 @@ impl Shared {
                 today,
                 all,
                 last: None,
-                pairing: Pairing::default(),
                 update_text: String::new(),
                 update_ready: None,
                 update_checking: false,
-                auto_pair_after: 0.0,
-                pair_browser_opened: false,
+                register_after: 0.0,
+                ever_connected: false,
                 restart: false,
                 server_name: None,
                 trust: None,
@@ -305,12 +293,20 @@ impl Shared {
         let status = self.status_text();
         let st = self.st.lock().unwrap();
         let cfg = self.cfg.lock().unwrap();
+        let trust = st.trust.as_deref().map(|t| {
+            let mut c = t.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        });
+        let running = match &trust {
+            Some(t) => format!("Running \u{b7} {t}"),
+            None => "Running".into(),
+        };
         let pill = match &st.phase {
-            Phase::Running => ("Running", "running"),
+            Phase::Running => (running.as_str(), "running"),
             Phase::Paused(_) | Phase::Cooldown => ("Paused", "paused"),
             Phase::Updating(_) => ("Updating", "busy"),
             Phase::Off => ("Off", "off"),
-            // Not connected yet: pairing runs by itself, nothing is wrong.
+            // Not connected yet: it registers by itself, nothing is wrong.
             Phase::NoToken => ("Connecting\u{2026}", "paused"),
             Phase::TokenRejected(_) => ("Token problem", "error"),
             Phase::Offline(_) => ("Offline", "error"),
@@ -330,67 +326,11 @@ impl Shared {
             "threads": st.threads, "busy": st.busy, "cooldown": cooldown,
             "mode": cfg.mode.key(), "running": cfg.running,
             "pause_fullscreen": cfg.pause_fullscreen, "pause_battery": cfg.pause_battery,
-            "startup": startup, "pairing": st.pairing,
-            "connected": st.server_name.is_some(), "name": st.server_name, "trust": st.trust,
+            "startup": startup,
+            "connected": st.server_name.is_some(), "name": st.server_name, "trust": trust,
             "update": st.update_text, "version": env!("CARGO_PKG_VERSION"),
             "server": cfg.server,
         })
-    }
-
-    /// Starts pairing in the background: asks the site for a code, opens the
-    /// approve page with `open`, waits, saves the token.
-    pub fn start_pairing(self: &Arc<Self>, name: String, open: fn(&str), open_browser: bool) {
-        {
-            let mut st = self.st.lock().unwrap();
-            if st.pairing.active {
-                if let Some(url) = st.pairing.url.clone() {
-                    if open_browser {
-                        open(&url);
-                    }
-                }
-                return;
-            }
-            st.pairing = Pairing { active: true, message: "Asking the site for a code...".into(), ..Default::default() };
-        }
-        let sh = self.clone();
-        std::thread::spawn(move || {
-            let server = sh.cfg.lock().unwrap().server.clone();
-            let set = |f: &dyn Fn(&mut Pairing)| f(&mut sh.st.lock().unwrap().pairing);
-            let started = match crate::pair::start(&server, &name) {
-                Ok(s) => s,
-                Err(e) => {
-                    crate::log!("pairing failed: {e}");
-                    set(&|p| *p = Pairing { message: format!("Couldn't start: {e}"), ..Default::default() });
-                    return;
-                }
-            };
-            crate::log!("pairing: code {} at {}", started.code, started.approve_url);
-            set(&|p| {
-                p.code = Some(started.code.clone());
-                p.url = Some(started.approve_url.clone());
-                p.message = "Approve it in your browser".into();
-            });
-            if open_browser {
-                open(&started.approve_url);
-                sh.st.lock().unwrap().pair_browser_opened = true;
-            }
-            let outcome = crate::pair::wait(&server, &started, &|| sh.quitting());
-            let message = match outcome {
-                Ok(crate::pair::Outcome::Approved(token)) => match sh.paths.write_token(&token) {
-                    Ok(()) => {
-                        crate::log!("paired: token saved");
-                        sh.token_changed();
-                        "Connected".to_string()
-                    }
-                    Err(e) => format!("Couldn't save the token: {e}"),
-                },
-                Ok(crate::pair::Outcome::Denied) => "Denied on the site".into(),
-                Ok(crate::pair::Outcome::Expired) => "The code expired; a new one follows".into(),
-                Ok(crate::pair::Outcome::Cancelled) => "Cancelled".into(),
-                Err(e) => format!("Pairing failed: {e}"),
-            };
-            set(&|p| *p = Pairing { message: message.clone(), ..Default::default() });
-        });
     }
 
     /// YouTube refused this machine: back off 60 s, doubling, up to 1 h.
@@ -552,6 +492,7 @@ impl Engine {
                                 st.video_max_bytes = h.video_max_bytes.unwrap_or(80 * 1024 * 1024);
                                 st.lease_seconds = h.lease_seconds.filter(|s| *s >= 30.0).unwrap_or(180.0);
                                 st.server_name = Some(h.name);
+                                st.ever_connected = true;
                                 st.trust = Some(h.trust);
                                 st.phase = Phase::Starting;
                                 api = Some(a);
@@ -571,11 +512,11 @@ impl Engine {
                 }
             }
 
-            // Updates: never without a token or while pairing.
+            // Updates: never without a token.
             {
                 let auto = sh.cfg.lock().unwrap().auto_update;
                 let mut st = sh.st.lock().unwrap();
-                let blocked = st.pairing.active || sh.paths.read_token().is_none() || sh.dry_run;
+                let blocked = sh.paths.read_token().is_none() || sh.dry_run;
                 if !auto {
                     st.update_text = format!("Updates off (v{})", env!("CARGO_PKG_VERSION"));
                 } else if now >= next_update && !blocked && !st.update_checking && st.update_ready.is_none()
@@ -589,7 +530,7 @@ impl Engine {
             }
             let ready = {
                 let st = sh.st.lock().unwrap();
-                if st.pairing.active { None } else { st.update_ready.clone() }
+                st.update_ready.clone()
             };
             if let Some((file, tag)) = ready {
                 sh.st.lock().unwrap().phase = Phase::Updating(tag.clone());
@@ -620,28 +561,45 @@ impl Engine {
                 continue;
             }
 
-            // Tray: no (working) token means pair, by itself. The browser opens
-            // the first time only; new codes come at most every 5 minutes.
-            if sh.interactive && api.is_none() {
-                let open = *sh.opener.lock().unwrap();
-                let first = {
-                    let mut st = sh.st.lock().unwrap();
-                    let unpaired = matches!(st.phase, Phase::NoToken | Phase::TokenRejected(_));
-                    if open.is_some() && unpaired && !st.pairing.active && now >= st.auto_pair_after {
-                        st.auto_pair_after = now + 300.0;
-                        Some(!st.pair_browser_opened)
-                    } else {
-                        None
-                    }
+            // No token, or one the site stopped taking: register a new worker.
+            // 429 (too many from this address today) waits 30 min; a token
+            // that had worked is replaced at most once an hour.
+            if api.is_none() {
+                let go = {
+                    let st = sh.st.lock().unwrap();
+                    let need = match st.phase {
+                        Phase::NoToken => true,
+                        Phase::TokenRejected(_) => true,
+                        _ => false,
+                    };
+                    need && now >= st.register_after
                 };
-                if let (Some(first), Some(open)) = (first, open) {
-                    sh.start_pairing(crate::pair::hostname(), open, first);
+                if go {
+                    let rejected = matches!(sh.st.lock().unwrap().phase, Phase::TokenRejected(_));
+                    let server = sh.cfg.lock().unwrap().server.clone();
+                    crate::log!("registering this machine with {server}");
+                    match crate::pair::register(&server, &crate::pair::hostname()) {
+                        Ok(token) => match sh.paths.write_token(&token) {
+                            Ok(()) => {
+                                crate::log!("registered: token saved");
+                                sh.st.lock().unwrap().register_after = now + if rejected { 3600.0 } else { 300.0 };
+                                sh.token_changed();
+                            }
+                            Err(e) => {
+                                crate::log!("registered, but the token could not be saved: {e}");
+                                sh.st.lock().unwrap().register_after = now + 300.0;
+                            }
+                        },
+                        Err(crate::pair::RegisterError::Limited) => {
+                            crate::log!("the site limits new workers from this address today; retrying in 30 min");
+                            sh.st.lock().unwrap().register_after = now + 1800.0;
+                        }
+                        Err(crate::pair::RegisterError::Other(e)) => {
+                            crate::log!("registering failed: {e}; retrying in 5 min");
+                            sh.st.lock().unwrap().register_after = now + 300.0;
+                        }
+                    }
                 }
-            }
-
-            // The CLI stops on a rejected token (the tray waits for a new one).
-            if !sh.interactive && matches!(sh.st.lock().unwrap().phase, Phase::TokenRejected(_)) {
-                break;
             }
 
             // Sensors and policy.
