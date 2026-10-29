@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = ["crates/mk-core", "crates/mk-worker"]
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# The fingerprint maths is the hot loop: full speed there.
+[profile.release.package.mk-core]
+opt-level = 3
+[profile.release.package.rustfft]
+opt-level = 3
+[profile.release.package.realfft]
+opt-level = 3
