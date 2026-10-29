@@ -5,10 +5,10 @@ use mk_core::internals::{loud_run, speed_grid, tempo_grid};
 use mk_core::pyops::{hanning_f32, interp_stretch, pairwise_sum, percentile, py_round};
 use serde_json::Value;
 
-/// The expected values come from numpy on Windows (the MSVC runtime's cos
-/// and pow). Elsewhere the platform libm may round a last bit differently,
-/// so those two checks allow one ulp there.
-const LIBM_ULPS: u64 = if cfg!(windows) { 0 } else { 1 };
+/// The expected values come from numpy on Windows. Another libm (glibc, or
+/// a different MSVC runtime than numpy's) may round a last bit differently,
+/// so those two checks allow one ulp.
+const LIBM_ULPS: u64 = 1;
 
 fn ulps32(a: f32, b: f32) -> u64 {
     (a.to_bits() as i64 - b.to_bits() as i64).unsigned_abs()
