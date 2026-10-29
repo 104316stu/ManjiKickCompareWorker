@@ -12,6 +12,8 @@ and how long it took.
 The shift search's wall-clock budget makes a result depend on the machine,
 so it is lifted here (every tempo is searched, as the Rust parity run does);
 --max-tempos N instead limits it to the first N tempos of the grid.
+--production keeps the site's 40 s budget and writes py_prod.json (run it
+with --jobs 1 so the clock means what it does on the server).
 """
 
 import argparse
@@ -26,11 +28,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CORPUS = os.path.join(HERE, "corpus")
 
 
-def load_module(path, max_tempos):
+def load_module(path, max_tempos, production=False):
+    os.environ.pop("AUDIO_MATCH_SHIFT_BUDGET_SECONDS", None)
     spec = importlib.util.spec_from_file_location("audio_match", path)
     am = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(am)
-    am.SHIFT_BUDGET_SECONDS = float("inf")
+    if not production:
+        am.SHIFT_BUDGET_SECONDS = float("inf")
     if max_tempos is not None:
         grid = am._tempo_grid
         am._tempo_grid = lambda: grid()[:max_tempos]
@@ -38,16 +42,18 @@ def load_module(path, max_tempos):
 
 
 _am = None
+_out_name = "py.json"
 
 
-def _init(path, max_tempos):
-    global _am
-    _am = load_module(path, max_tempos)
+def _init(path, max_tempos, production):
+    global _am, _out_name
+    _am = load_module(path, max_tempos, production)
+    _out_name = "py_prod.json" if production else "py.json"
 
 
 def run_pair(folder, force):
     am = _am
-    out = os.path.join(folder, "py.json")
+    out = os.path.join(folder, _out_name)
     if os.path.exists(out) and not force:
         return folder, "cached"
     with open(os.path.join(folder, "meta.json"), encoding="utf-8") as fh:
@@ -82,6 +88,8 @@ def main():
     ap.add_argument("--jobs", type=int, default=4)
     ap.add_argument("--max-tempos", type=int, default=None)
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--production", action="store_true",
+                    help="keep the site's 40 s shift budget; write py_prod.json")
     args = ap.parse_args()
     if not args.audio_match or not os.path.exists(args.audio_match):
         sys.exit("pass --audio-match or set AUDIO_MATCH_PY to the site's audio_match.py")
@@ -89,7 +97,7 @@ def main():
                       if os.path.exists(os.path.join(CORPUS, d, "meta.json"))),
                      key=lambda p: int(os.path.basename(p)))
     with ProcessPoolExecutor(args.jobs, initializer=_init,
-                             initargs=(args.audio_match, args.max_tempos)) as pool:
+                             initargs=(args.audio_match, args.max_tempos, args.production)) as pool:
         futures = [pool.submit(run_pair, f, args.force) for f in folders]
         for fut in futures:
             folder, what = fut.result()

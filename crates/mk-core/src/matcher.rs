@@ -27,13 +27,10 @@ pub struct Options {
 
 impl Default for Options {
     /// The site's behaviour: the shift search stops trying new tempos after
-    /// AUDIO_MATCH_SHIFT_BUDGET_SECONDS (default 40 s).
+    /// 40 s. Fixed here (the environment is not read); set
+    /// `shift_budget_seconds` to change it.
     fn default() -> Self {
-        let budget = std::env::var("AUDIO_MATCH_SHIFT_BUDGET_SECONDS")
-            .ok()
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .unwrap_or(SHIFT_BUDGET_SECONDS_DEFAULT);
-        Options { shift_budget_seconds: Some(budget), max_tempos: None, threads: 1 }
+        Options { shift_budget_seconds: Some(SHIFT_BUDGET_SECONDS_DEFAULT), max_tempos: None, threads: 1 }
     }
 }
 
@@ -288,7 +285,7 @@ pub fn speed_grid() -> Vec<f64> {
         }
         s *= SPEED_STEP;
     }
-    grid.sort_by(|a, b| a.ln().abs().partial_cmp(&b.ln().abs()).unwrap());
+    grid.sort_by(|a, b| a.ln().abs().total_cmp(&b.ln().abs()));
     grid
 }
 
@@ -616,30 +613,54 @@ fn best_shift(
 }
 
 /// _shift_search.
-fn shift_search(x_clip: &[f32], video: &VideoPrint, opts: &Options) -> Option<Score> {
-    let deadline = opts.shift_budget_seconds.map(|b| Instant::now() + Duration::from_secs_f64(b.max(0.0)));
+/// How far the coarse tempo sweep of a shift search got.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ShiftProgress {
+    /// Coarse tempos voted on.
+    pub tried: usize,
+    /// True when the time budget or `max_tempos` ended the sweep before
+    /// the grid did (and no strong hit had ended it first).
+    pub cut: bool,
+}
+
+fn deadline_after(budget: Option<f64>) -> Option<Instant> {
+    let b = budget?;
+    if b.is_nan() {
+        return Some(Instant::now());
+    }
+    let d = Duration::try_from_secs_f64(b.max(0.0)).ok()?; // too large: no limit
+    Instant::now().checked_add(d)
+}
+
+fn shift_search(x_clip: &[f32], video: &VideoPrint, opts: &Options, progress: &mut ShiftProgress) -> Option<Score> {
+    let deadline = deadline_after(opts.shift_budget_seconds);
     let p = clip_peaks(excerpt(x_clip));
     let prs = pairs(p.t.len());
     let steps = py_round_int(SHIFT_SEMITONES / SHIFT_STEP);
     let coarse: Vec<f64> = (-steps..=steps).map(|i| i as f64 * SHIFT_STEP).collect();
     let mut best: Option<ShiftBest> = None;
-    let mut grid = tempo_grid();
+    let full_grid = tempo_grid();
+    let mut grid = full_grid.clone();
     if let Some(m) = opts.max_tempos {
         grid.truncate(m);
     }
     let threads = opts.threads.max(1);
+    let mut strong = false;
     'grid: for batch in grid.chunks(threads) {
         if deadline.is_some_and(|d| Instant::now() > d) {
             break;
         }
         let votes = par_map(batch, threads, |&tempo| pitch_votes(&p, &prs, video, tempo, &coarse));
         for (&tempo, v) in batch.iter().zip(votes) {
+            progress.tried += 1;
             best = best_shift(v, tempo, &coarse, best);
             if best.is_some_and(|b| b.density >= SWEEP_ENOUGH_DENSITY) {
+                strong = true;
                 break 'grid;
             }
         }
     }
+    progress.cut = !strong && progress.tried < full_grid.len();
     let b0 = best?;
     let fine: Vec<f64> = (-4..=4).map(|i| b0.semitones + i as f64 * SHIFT_REFINE_STEP).collect();
     let centre = b0.tempo;
@@ -691,6 +712,8 @@ pub fn compare_pcm(x_clip: &[f32], x_video: &[f32], total_seconds: Option<f64>, 
         clip_hashes: None,
         semitones: None,
         pitch_searched: false,
+        shift_tempos: None,
+        shift_cut: false,
         clip_seconds: py_round(decoded, 2),
         video_seconds: py_round(x_video.len() as f64 / fs, 2),
         clip_total_seconds: py_round(decoded.max(total_seconds.unwrap_or(0.0)), 2),
@@ -700,7 +723,10 @@ pub fn compare_pcm(x_clip: &[f32], x_video: &[f32], total_seconds: Option<f64>, 
     };
     if best.is_none() {
         result.pitch_searched = true;
-        best = shift_search(x_clip, &video, opts);
+        let mut progress = ShiftProgress::default();
+        best = shift_search(x_clip, &video, opts, &mut progress);
+        result.shift_tempos = Some(progress.tried);
+        result.shift_cut = progress.cut;
     }
     let Some(best) = best else {
         result.verdict = "different".into();

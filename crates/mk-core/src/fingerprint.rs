@@ -70,7 +70,9 @@ pub fn spectrogram(x: &[f32]) -> Spectrogram {
             let v = mag + 1e-6f32;
             let db = 20.0f32 * ((v as f64).log10() as f32);
             row[k] = db;
-            if db > max {
+            // numpy's max propagates NaN: one NaN bin (non-finite PCM)
+            // makes the whole spectrogram NaN, so it has no peaks.
+            if !max.is_nan() && (db > max || db.is_nan()) {
                 max = db;
             }
         }
@@ -79,6 +81,12 @@ pub fn spectrogram(x: &[f32]) -> Spectrogram {
         *v -= max;
     }
     Spectrogram { data, frames: n_frames }
+}
+
+/// partial_cmp where it is defined (so -0.0 == 0.0 as in numpy's sorts),
+/// total_cmp for NaN: a total order, so sorting never panics.
+fn cmp_f32(a: f32, b: f32) -> std::cmp::Ordering {
+    a.partial_cmp(&b).unwrap_or_else(|| a.total_cmp(&b))
 }
 
 /// Frequency-direction running max over +-df (edges clipped), as the
@@ -121,7 +129,7 @@ pub fn peaks(s: &Spectrogram) -> (Vec<i64>, Vec<i64>) {
             return;
         }
         // lexsort((-amp, bucket)): amplitude descending, stable.
-        bucket.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        bucket.sort_by(|a, b| cmp_f32(b.2, a.2));
         bucket.truncate(PEAKS_PER_SECOND);
         bucket.sort_by(|a, b| (a.0, a.1).cmp(&(b.0, b.1)));
         for &(t, f, _) in bucket.iter() {

@@ -86,8 +86,11 @@ fn pairwise_inner(a: &[f64]) -> f64 {
 
 /// `np.percentile(values, q)` with the default 'linear' method.
 pub fn percentile(values: &[f64], q: f64) -> f64 {
+    if values.is_empty() || values.iter().any(|v| v.is_nan()) {
+        return f64::NAN; // numpy: NaN in, NaN out
+    }
     let mut v = values.to_vec();
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.sort_by(|a, b| a.total_cmp(b));
     let n = v.len();
     let quantile = q / 100.0;
     let virtual_index = (n as f64 - 1.0) * quantile;

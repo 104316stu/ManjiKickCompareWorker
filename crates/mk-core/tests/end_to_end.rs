@@ -78,3 +78,52 @@ fn unrelated_audio_is_different() {
 fn short_clip_is_refused() {
     assert_eq!(Clip::from_pcm(vec![0.0; FS as usize]).unwrap_err().to_string(), "clip shorter than two seconds");
 }
+
+#[test]
+fn non_finite_pcm_is_different_not_a_panic() {
+    // numpy turns one NaN/inf sample into an all-NaN spectrogram (its max
+    // is NaN), so nothing has peaks and the site answers 'different'.
+    let video = song(60.0, 7);
+    let start = 10 * FS as usize;
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut clip = video[start..start + 30 * FS as usize].to_vec();
+        clip[1234] = bad;
+        let r = run(clip, &video);
+        assert_eq!(r.verdict, "different", "clip with {bad}: {r:?}");
+        let mut v = video.clone();
+        v[99_999] = bad;
+        let r = run(video[start..start + 30 * FS as usize].to_vec(), &v);
+        assert_eq!(r.verdict, "different", "video with {bad}: {r:?}");
+        assert_eq!(r.aligned, 0);
+    }
+}
+
+#[test]
+fn shift_search_reports_its_tempos() {
+    let video = song(60.0, 7);
+    let r = run(noise(20.0, 5), &video);
+    assert_eq!(r.shift_tempos, Some(3));
+    assert!(r.shift_cut); // max_tempos stopped it before the 72-tempo grid ended
+    let json = serde_json::to_value(&r).unwrap();
+    assert_eq!(json["shift_tempos"], 3);
+    assert_eq!(json["shift_cut"], true);
+
+    let full = compare_with(&Clip::from_pcm(noise(20.0, 5)).unwrap(), &video, &Options::exhaustive());
+    assert_eq!(full.shift_tempos, Some(72));
+    assert!(!full.shift_cut);
+    assert!(serde_json::to_value(&full).unwrap().get("shift_cut").is_none());
+}
+
+#[test]
+fn default_budget_is_fixed() {
+    std::env::set_var("AUDIO_MATCH_SHIFT_BUDGET_SECONDS", "1");
+    assert_eq!(Options::default().shift_budget_seconds, Some(40.0));
+    assert_eq!(Options::default().threads, 1);
+    // An infinite or NaN budget must not panic.
+    let video = song(30.0, 7);
+    for b in [f64::INFINITY, f64::NAN, -1.0] {
+        let o = Options { shift_budget_seconds: Some(b), ..Options::exhaustive() };
+        let r = compare_with(&Clip::from_pcm(noise(5.0, 3)).unwrap(), &video, &o);
+        assert_eq!(r.verdict, "different");
+    }
+}

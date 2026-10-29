@@ -1,7 +1,7 @@
 //! Parity run: compare every corpus pair in Rust and diff against the
 //! Python reference (parity/py_reference.py).
 //!
-//!   cargo run -p mk-core --release --example parity -- parity/corpus [--max-tempos N] [--threads N]
+//!   cargo run -p mk-core --release --example parity -- parity/corpus [--max-tempos N] [--threads N] [--production]
 //!       [--decode <ffmpeg>]   (also re-decode clip.bin / video.<ext> with mk_core::decode
 //!                              and check the PCM equals Python's)
 //!
@@ -27,7 +27,11 @@ fn num(v: &Value, k: &str) -> Option<f64> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let corpus = PathBuf::from(args.get(1).map(String::as_str).unwrap_or("parity/corpus"));
-    let mut opts = Options::exhaustive();
+    let production = args.iter().any(|a| a == "--production");
+    // --production: the worker's own path (Options::default(): 40 s budget,
+    // one thread) against py_prod.json, Python with its real budget.
+    let mut opts = if production { Options::default() } else { Options::exhaustive() };
+    let (py_name, rs_name) = if production { ("py_prod.json", "rs_prod.json") } else { ("py.json", "rs.json") };
     if let Some(i) = args.iter().position(|a| a == "--max-tempos") {
         opts.max_tempos = Some(args[i + 1].parse().unwrap());
     }
@@ -36,12 +40,13 @@ fn main() {
     }
     let ffmpeg = args.iter().position(|a| a == "--decode").map(|i| PathBuf::from(&args[i + 1]));
     let (mut decode_checked, mut decode_diff) = (0, 0);
+    let mut shift_cut = 0;
     let mut dirs: Vec<(u64, PathBuf)> = std::fs::read_dir(&corpus)
         .unwrap()
         .filter_map(|e| {
             let p = e.ok()?.path();
             let n = p.file_name()?.to_str()?.parse::<u64>().ok()?;
-            p.join("py.json").exists().then_some((n, p))
+            p.join(py_name).exists().then_some((n, p))
         })
         .collect();
     dirs.sort();
@@ -53,7 +58,7 @@ fn main() {
     let mut by_verdict = std::collections::BTreeMap::<String, (u32, u32)>::new();
     let mut ratios = Vec::new();
     for (n, dir) in &dirs {
-        let py: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("py.json")).unwrap()).unwrap();
+        let py: Value = serde_json::from_str(&std::fs::read_to_string(dir.join(py_name)).unwrap()).unwrap();
         let Some(pr) = py.get("result") else {
             errors += 1;
             println!("{n:>4} python error: {}", py["error"]);
@@ -86,7 +91,7 @@ fn main() {
         let r = compare_with(&clip, &video, &opts);
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         let rv = serde_json::to_value(&r).unwrap();
-        std::fs::write(dir.join("rs.json"), serde_json::to_string(&json!({"ms": ms, "result": rv})).unwrap()).unwrap();
+        std::fs::write(dir.join(rs_name), serde_json::to_string(&json!({"ms": ms, "result": rv})).unwrap()).unwrap();
         pairs += 1;
         let py_ms = py["ms"].as_f64().unwrap_or(0.0);
         rs_ms_total += ms;
@@ -140,7 +145,16 @@ fn main() {
                 off.push(format!("semitones {psm:?} vs {rsm:?}"));
             }
         }
-        let exact = rv == *pr;
+        // shift_tempos / shift_cut are the worker's own additions.
+        let mut rv_cmp = rv.clone();
+        if let Some(m) = rv_cmp.as_object_mut() {
+            m.remove("shift_tempos");
+            m.remove("shift_cut");
+        }
+        let exact = rv_cmp == *pr;
+        if r.shift_cut {
+            shift_cut += 1;
+        }
         println!(
             "{n:>4} py {pv:<9} rs {:<9} {:>8.1} ms (py {:>8.1} ms){}{}",
             r.verdict,
@@ -163,6 +177,7 @@ fn main() {
     if ffmpeg.is_some() {
         println!("decode: {decode_checked} pairs re-decoded in Rust, {decode_diff} differ from Python's PCM");
     }
+    println!("rust shift searches cut short by the budget: {shift_cut}");
     println!("verdict agreement {agree}/{pairs} = {:.2} %", share * 100.0);
     println!("rust 'same' where python 'different': {false_same}");
     println!("numeric tolerance misses: {}", numeric_off.len());

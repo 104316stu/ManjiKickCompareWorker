@@ -97,9 +97,14 @@ pub fn decode(ffmpeg: &Path, source: Source, max_seconds: f64) -> Result<Vec<f32
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     }
-    let mut child = cmd.spawn().map_err(|e| MatchError::Ffmpeg(e.to_string()))?;
-    let mut out_pipe = child.stdout.take().unwrap();
-    let mut err_pipe = child.stderr.take().unwrap();
+    let child = cmd.spawn().map_err(|e| MatchError::Ffmpeg(e.to_string()))?;
+    // Killed and reaped on every way out of here, unless it exited itself.
+    let mut child = KillOnDrop(child);
+    let out_pipe = child.0.stdout.take();
+    let err_pipe = child.0.stderr.take();
+    let (Some(mut out_pipe), Some(mut err_pipe)) = (out_pipe, err_pipe) else {
+        return Err(MatchError::Ffmpeg("no output pipes".into()));
+    };
     let out_t = std::thread::spawn(move || {
         let mut v = Vec::new();
         let _ = out_pipe.read_to_end(&mut v);
@@ -110,20 +115,20 @@ pub fn decode(ffmpeg: &Path, source: Source, max_seconds: f64) -> Result<Vec<f32
         let _ = err_pipe.read_to_end(&mut v);
         v
     });
-    let in_t = stdin_bytes.map(|b| {
-        let mut pipe = child.stdin.take().unwrap();
-        let data = b.to_vec();
-        std::thread::spawn(move || {
-            let _ = pipe.write_all(&data);
-        })
-    });
+    let in_t = match (stdin_bytes, child.0.stdin.take()) {
+        (Some(b), Some(mut pipe)) => {
+            let data = b.to_vec();
+            Some(std::thread::spawn(move || {
+                let _ = pipe.write_all(&data);
+            }))
+        }
+        _ => None,
+    };
     let deadline = Instant::now() + DECODE_TIMEOUT;
     let status = loop {
-        match child.try_wait() {
+        match child.0.try_wait() {
             Ok(Some(s)) => break s,
             Ok(None) if Instant::now() > deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
                 return Err(MatchError::Ffmpeg(format!(
                     "timed out after {} seconds",
                     DECODE_TIMEOUT.as_secs()
@@ -142,6 +147,20 @@ pub fn decode(ffmpeg: &Path, source: Source, max_seconds: f64) -> Result<Vec<f32
         return Err(MatchError::Undecodable(last_line(&stderr)));
     }
     Ok(stdout.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect())
+}
+
+/// A running ffmpeg that is killed and waited for when dropped, so no
+/// error path leaves it behind (pipes close once it is gone, which ends the
+/// reader threads).
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Ok(None) | Err(_) = self.0.try_wait() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
 }
 
 /// Python: stderr.decode("utf-8", "replace").strip().splitlines()[-1][:160]
@@ -186,7 +205,7 @@ pub fn video_too_short(x_video: &[f32]) -> bool {
 }
 
 /// The site's compare_pcm(clip.pcm, x_video, clip.total_seconds), with
-/// its 40 s shift-search budget (AUDIO_MATCH_SHIFT_BUDGET_SECONDS).
+/// its 40 s shift-search budget (Options::default()).
 pub fn compare(clip: &Clip, x_video: &[f32]) -> CompareResult {
     compare_with(clip, x_video, &Options::default())
 }
@@ -217,6 +236,13 @@ pub struct CompareResult {
     pub semitones: Option<f64>,
     /// Serialized only when true.
     pub pitch_searched: bool,
+    /// Not in the server's dict: when the shift search ran, how many of its
+    /// coarse tempos (72 in the grid) were voted on. Serialized only then.
+    pub shift_tempos: Option<usize>,
+    /// Not in the server's dict: the shift search's time budget (or
+    /// `max_tempos`) ended it before the tempo grid did, so a pitch-shifted
+    /// match may have been missed. Serialized only when true.
+    pub shift_cut: bool,
     pub clip_seconds: f64,
     pub video_seconds: f64,
     pub clip_total_seconds: f64,
@@ -235,6 +261,12 @@ impl Serialize for CompareResult {
         m.serialize_entry("clip_total_seconds", &self.clip_total_seconds)?;
         if self.pitch_searched {
             m.serialize_entry("pitch_searched", &true)?;
+        }
+        if let Some(n) = self.shift_tempos {
+            m.serialize_entry("shift_tempos", &n)?;
+        }
+        if self.shift_cut {
+            m.serialize_entry("shift_cut", &true)?;
         }
         m.serialize_entry("verdict", &self.verdict)?;
         m.serialize_entry("speed", &self.speed)?;
