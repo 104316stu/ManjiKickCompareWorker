@@ -582,7 +582,9 @@ impl Engine {
                         Phase::TokenRejected(_) => true,
                         _ => false,
                     };
-                    need && now >= st.register_after
+                    // A token from MKW_TOKEN can't be replaced by registering.
+                    let from_env = std::env::var("MKW_TOKEN").is_ok_and(|t| t.trim().starts_with("mkw_"));
+                    need && !from_env && now >= st.register_after
                 };
                 if go {
                     let rejected = matches!(sh.st.lock().unwrap().phase, Phase::TokenRejected(_));
@@ -718,7 +720,7 @@ impl Engine {
                             api = None;
                             next_hello = now + 600.0;
                         }
-                        Err(ApiError::Slow) => next_lease = now + 60.0,
+                        Err(ApiError::Slow(after)) => next_lease = now + after.unwrap_or(60.0).clamp(5.0, 600.0),
                         Err(e) => {
                             crate::log!("lease failed: {e}");
                             next_lease = now + 30.0;

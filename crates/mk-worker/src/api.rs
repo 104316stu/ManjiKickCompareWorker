@@ -40,8 +40,8 @@ pub enum ApiError {
     Auth(u16),
     /// 409: the lease is gone.
     Stale,
-    /// 429.
-    Slow,
+    /// 429, with the server's Retry-After in seconds when it sent one.
+    Slow(Option<f64>),
     Http(u16),
     Net(String),
     Bad(String),
@@ -52,7 +52,7 @@ impl std::fmt::Display for ApiError {
         match self {
             ApiError::Auth(c) => write!(f, "token refused (HTTP {c})"),
             ApiError::Stale => write!(f, "lease no longer valid (HTTP 409)"),
-            ApiError::Slow => write!(f, "server asked to slow down (HTTP 429)"),
+            ApiError::Slow(_) => write!(f, "server asked to slow down (HTTP 429)"),
             ApiError::Http(c) => write!(f, "HTTP {c}"),
             ApiError::Net(s) => write!(f, "network: {s}"),
             ApiError::Bad(s) => write!(f, "bad reply: {s}"),
@@ -95,7 +95,9 @@ fn map_err(e: ureq::Error) -> ApiError {
     match e {
         ureq::Error::Status(c, _) if c == 401 || c == 403 => ApiError::Auth(c),
         ureq::Error::Status(409, _) => ApiError::Stale,
-        ureq::Error::Status(429, _) => ApiError::Slow,
+        ureq::Error::Status(429, resp) => ApiError::Slow(
+            resp.header("Retry-After").and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite() && *v >= 0.0),
+        ),
         ureq::Error::Status(c, _) => ApiError::Http(c),
         ureq::Error::Transport(t) => ApiError::Net(t.to_string()),
     }

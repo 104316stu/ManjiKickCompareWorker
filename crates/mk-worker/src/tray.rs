@@ -20,7 +20,10 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_OPEN_PANEL: u32 = WM_APP + 2;
 /// `--hide-panel` from a second launch (scripts and timing checks).
 const WM_HIDE_PANEL: u32 = WM_APP + 3;
-const CLASS_NAME: &str = "ManjiKickWorkerTray";
+/// The tray window's class (found by a second launch); per instance home.
+fn class_name() -> String {
+    format!("ManjiKickWorkerTray{}", crate::platform::instance_suffix())
+}
 const TIMER_ID: usize = 1;
 
 const ID_RUNNING: u32 = 10;
@@ -486,7 +489,7 @@ pub fn main() {
     let Some(_instance) = crate::platform::single_instance_after_update() else {
         // Already running: open its panel instead (like a second click on the icon).
         unsafe {
-            let other = FindWindowW(wide(CLASS_NAME).as_ptr(), std::ptr::null());
+            let other = FindWindowW(wide(&class_name()).as_ptr(), std::ptr::null());
             if !other.is_null() {
                 AllowSetForegroundWindow(u32::MAX); // ASFW_ANY
                 let msg = if std::env::args().any(|a| a == "--hide-panel") { WM_HIDE_PANEL } else { WM_OPEN_PANEL };
@@ -537,7 +540,7 @@ pub fn main() {
     unsafe {
         let _ = TASKBAR_CREATED.set(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()));
         let hinst = GetModuleHandleW(std::ptr::null());
-        let class = wide(CLASS_NAME);
+        let class = wide(&class_name());
         let wc = WNDCLASSW {
             style: 0,
             lpfnWndProc: Some(wndproc),
@@ -599,7 +602,7 @@ fn run_downloaded_copy() {
     let mine = crate::update::current();
     let theirs = if installed.exists() { crate::install::version_of(&installed) } else { None };
     let newer = theirs.map_or(true, |v| mine > v);
-    let running = unsafe { FindWindowW(wide(CLASS_NAME).as_ptr(), std::ptr::null()) };
+    let running = unsafe { FindWindowW(wide(&class_name()).as_ptr(), std::ptr::null()) };
     if !newer {
         // Same or newer version installed: open it (its panel if it runs).
         unsafe {
@@ -636,11 +639,13 @@ fn run_downloaded_copy() {
 
 /// Exit code the child uses for a deliberate quit (menu, uninstall, update):
 /// anything else is a crash and gets restarted.
-const SUPERVISOR_LOCK: &str = "Local\\ManjiKickWorker.supervisor";
+pub fn supervisor_lock() -> String {
+    format!("Local\\ManjiKickWorker.supervisor{}", crate::platform::instance_suffix())
+}
 
 fn open_running_panel() -> bool {
     unsafe {
-        let other = FindWindowW(wide(CLASS_NAME).as_ptr(), std::ptr::null());
+        let other = FindWindowW(wide(&class_name()).as_ptr(), std::ptr::null());
         if other.is_null() {
             return false;
         }
@@ -656,12 +661,12 @@ fn open_running_panel() -> bool {
 /// says so. A normal exit (Quit, Uninstall, an update handing over) ends it.
 fn supervise() {
     let updated = std::env::var_os("MKW_UPDATED").is_some();
-    let mut lock = crate::platform::named_lock(SUPERVISOR_LOCK);
+    let mut lock = crate::platform::named_lock(&supervisor_lock());
     // Right after an update the previous supervisor may still be exiting.
     let mut tries = 0;
     while lock.is_none() && updated && tries < 60 {
         std::thread::sleep(Duration::from_millis(500));
-        lock = crate::platform::named_lock(SUPERVISOR_LOCK);
+        lock = crate::platform::named_lock(&supervisor_lock());
         tries += 1;
     }
     let Some(_lock) = lock else {

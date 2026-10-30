@@ -96,7 +96,7 @@ pub fn stop_running() {
     while Instant::now() < until {
         // Both the worker and its supervisor have to be gone.
         if let Some(lock) = crate::platform::single_instance() {
-            if let Some(sup) = crate::platform::named_lock("Local\\ManjiKickWorker.supervisor") {
+            if let Some(sup) = crate::platform::named_lock(&crate::tray::supervisor_lock()) {
                 drop(sup);
                 drop(lock);
                 let _ = std::fs::remove_file(paths.stop_file());

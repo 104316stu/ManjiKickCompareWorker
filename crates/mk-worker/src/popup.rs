@@ -98,14 +98,53 @@ pub fn init(tray: HWND, data_dir: std::path::PathBuf, handler: Handler, state: f
     }
 }
 
+/// MSVC builds link the WebView2 loader in. GNU builds have only its DLL,
+/// so they load it when the panel is first made: a missing DLL then means
+/// "no panel, use the menu" instead of a program that cannot start.
+#[cfg(target_env = "msvc")]
+unsafe fn create_environment(
+    data: &HSTRING,
+    handler: &ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
+) -> windows_core::Result<()> {
+    CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), data, None, handler)
+}
+
+#[cfg(not(target_env = "msvc"))]
+unsafe fn create_environment(
+    data: &HSTRING,
+    handler: &ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler,
+) -> windows_core::Result<()> {
+    use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+    type Create = unsafe extern "system" fn(
+        PCWSTR,
+        PCWSTR,
+        *mut core::ffi::c_void,
+        *mut core::ffi::c_void,
+    ) -> windows_core::HRESULT;
+    let lib = LoadLibraryW(wide("WebView2Loader.dll").as_ptr());
+    if lib.is_null() {
+        return Err(windows_core::Error::from_win32());
+    }
+    let Some(f) = GetProcAddress(lib, b"CreateCoreWebView2EnvironmentWithOptions\0".as_ptr()) else {
+        return Err(windows_core::Error::from_win32());
+    };
+    let create: Create = std::mem::transmute(f);
+    create(
+        PCWSTR::null(),
+        PCWSTR(data.as_ptr()),
+        std::ptr::null_mut(),
+        windows_core::Interface::as_raw(handler),
+    )
+    .ok()
+}
+
 fn create_webview(hwnd: HWND, data_dir: &std::path::Path, handler: Handler) -> Result<(ICoreWebView2Controller, ICoreWebView2), String> {
     let _ = std::fs::create_dir_all(data_dir);
     let data = HSTRING::from(data_dir.as_os_str());
     let (tx, rx) = std::sync::mpsc::channel();
     CreateCoreWebView2EnvironmentCompletedHandler::wait_for_async_operation(
         Box::new(move |h| unsafe {
-            CreateCoreWebView2EnvironmentWithOptions(PCWSTR::null(), &data, None, &h)
-                .map_err(webview2_com::Error::WindowsError)
+            create_environment(&data, &h).map_err(webview2_com::Error::WindowsError)
         }),
         Box::new(move |code, env| {
             code?;

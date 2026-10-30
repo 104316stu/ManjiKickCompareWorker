@@ -11,11 +11,18 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 /// yt-dlp's stderr that means YouTube is refusing this machine, not the video.
-const REFUSED: &[&str] = &["HTTP Error 429", "Too Many Requests", "Sign in to confirm you", "confirm you're not a bot"];
+const REFUSED: &[&str] = &["HTTP Error 429", "Too Many Requests", "Sign in to confirm you", "confirm you're not a bot", "confirm you\u{2019}re not a bot"];
 /// The site's own format choice, so a verdict differs only if the machine does.
 const FORMAT: &str = "bestaudio[ext=webm][protocol=https]/bestaudio[ext=m4a][protocol=https]/bestaudio";
 /// Slowest speed the compare searches (the clip may be slowed down to this).
 const SPEED_MIN: f64 = 0.78;
+/// The site's own wording, so it stores these results instead of redoing them.
+const LIVE: &str = "Live audio is not supported for comparison";
+
+fn too_long(video_seconds: f64, max_video: u32) -> String {
+    format!("video is {} min long, over the {} min limit for comparing",
+        (video_seconds / 60.0).floor() as i64, max_video / 60)
+}
 
 enum Download {
     Ok(PathBuf),
@@ -52,7 +59,7 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
         }
         Err(e) => {
             hand_back(api, job, &format!("clip not available ({e})"));
-            sh.back_off(if matches!(e, ApiError::Slow) { 30.0 } else { 10.0 });
+            sh.back_off(if matches!(e, ApiError::Slow(_)) { 30.0 } else { 10.0 });
             return 0.0;
         }
     };
@@ -88,6 +95,12 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
             post(sh, api, job, "unknown", Map::new(), Some(msg), json!({}), started);
             return 0.0;
         }
+    }
+
+    // A video known to be over the limit isn't downloaded at all.
+    if let Some(video_seconds) = job.video_seconds.filter(|v| v.is_finite() && *v > max_video as f64) {
+        post(sh, api, job, "unknown", Map::new(), Some(too_long(video_seconds, max_video)), json!({}), started);
+        return 0.0;
     }
 
     let folder = sh.paths.tmp_dir.join(format!("job-{}-{}", job.job_id, std::process::id()));
@@ -176,6 +189,7 @@ fn post(sh: &Shared, api: &Api, job: &Job, verdict: &str, result: Map<String, Va
     let body = json!({"job_id": job.job_id, "lease": job.lease, "verdict": verdict, "result": result,
                       "error": error, "timing": timing});
     let mut tries = 0;
+    let mut slow_tries = 0;
     loop {
         match api.result(&body) {
             Ok(reply) => {
@@ -193,6 +207,14 @@ fn post(sh: &Shared, api: &Api, job: &Job, verdict: &str, result: Map<String, Va
                 crate::log!("job {}: result refused, token rejected (HTTP {c})", job.job_id);
                 sh.token_rejected(c);
                 return;
+            }
+            Err(ApiError::Slow(after)) if slow_tries < 6 => {
+                // Retry-After when given, else 5 s doubling; new leases wait too.
+                let wait = after.unwrap_or(5.0 * 2f64.powi(slow_tries)).clamp(1.0, 120.0);
+                slow_tries += 1;
+                sh.back_off(wait);
+                crate::log!("job {}: the site asked to slow down; posting again in {:.0} s", job.job_id, wait);
+                std::thread::sleep(Duration::from_secs_f64(wait));
             }
             Err(e) if tries < 2 => {
                 tries += 1;
@@ -222,8 +244,14 @@ fn download(cancel: &dyn Fn() -> bool, tools: &Tools, video_id: &str, folder: &P
         .args(["--socket-timeout", "20", "--retries", "2"])
         .arg("-o")
         .arg(folder.join("%(id)s.%(ext)s"))
+        // Length and live flag first (printed even when the filter skips it),
+        // then the downloaded file.
+        .args(["--print", "pre_process:%(duration)s|%(is_live)s"])
         .args(["--print", "after_move:filepath"])
         .env("DENO_NO_UPDATE_CHECK", "1")
+        // yt-dlp (Python) writes UTF-8 then, not the Windows code page.
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
         .stdout(fo)
         .stderr(fe);
     if let Some(deno) = &tools.deno {
@@ -238,18 +266,35 @@ fn download(cancel: &dyn Fn() -> bool, tools: &Tools, video_id: &str, folder: &P
     // The id goes after "--" so it can never be read as an option.
     cmd.arg("--").arg(format!("https://www.youtube.com/watch?v={video_id}"));
     let (status, cpu) = crate::proc::run(&mut cmd, Instant::now() + limit, cancel);
-    let stdout = std::fs::read_to_string(&out).unwrap_or_default();
-    let stderr = std::fs::read_to_string(&err).unwrap_or_default();
+    // Lossy: one byte that isn't UTF-8 (a curly quote in the console's code
+    // page) must not blank the whole message.
+    let read = |p: &Path| String::from_utf8_lossy(&std::fs::read(p).unwrap_or_default()).into_owned();
+    let stdout = read(&out);
+    let stderr = read(&err);
     let outcome = match status {
         Err(crate::proc::RunError::Cancelled) => Download::Cancelled,
         Err(crate::proc::RunError::Timeout) => Download::Local(format!("download took over {} s", limit.as_secs())),
         Err(crate::proc::RunError::Spawn(e)) => Download::Local(format!("yt-dlp failed to start: {e}")),
         Ok(_) if REFUSED.iter().any(|m| stderr.contains(m)) => Download::Refused(first_line(&stderr)),
-        Ok(_) => match stdout.lines().map(str::trim).filter(|l| !l.is_empty()).last().map(PathBuf::from) {
-            Some(p) if p.is_file() => Download::Ok(p),
-            _ if !stderr.trim().is_empty() => Download::Failed(first_line(&stderr)),
-            _ => Download::Failed("video skipped (live or too long)".into()),
-        },
+        Ok(_) => {
+            let lines: Vec<&str> = stdout.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+            let file = lines.iter().rev().map(PathBuf::from).find(|p| p.is_file());
+            // "1234.0|False" from the pre_process print.
+            let (duration, live) = lines
+                .iter()
+                .find_map(|l| l.split_once('|'))
+                .map(|(d, l)| (d.trim().parse::<f64>().ok().filter(|d| d.is_finite()), l.trim() == "True"))
+                .unwrap_or((None, false));
+            match file {
+                Some(p) => Download::Ok(p),
+                None if live => Download::Failed(LIVE.into()),
+                None if duration.is_some_and(|d| d > max_video as f64) => {
+                    Download::Failed(too_long(duration.unwrap_or(0.0), max_video))
+                }
+                None if !stderr.trim().is_empty() => Download::Failed(first_line(&stderr)),
+                None => Download::Failed("video skipped (live or too long)".into()),
+            }
+        }
     };
     (outcome, cpu)
 }
@@ -320,5 +365,13 @@ ERROR: [youtube] abc: Video unavailable https://www.youtube.com/watch?v=abc
         let mut keys: Vec<_> = n.keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, ["aligned", "offset_seconds", "pitch_searched", "speed"]);
+    }
+}
+
+#[cfg(test)]
+mod wording_tests {
+    #[test]
+    fn too_long_matches_the_site() {
+        assert_eq!(super::too_long(3725.0, 1800), "video is 62 min long, over the 30 min limit for comparing");
     }
 }

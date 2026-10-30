@@ -3,6 +3,21 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// "" normally; "-<hash>" when MKW_HOME points elsewhere, so a test run
+/// with its own home has its own locks and window and leaves the real app alone.
+pub fn instance_suffix() -> String {
+    match std::env::var_os("MKW_HOME").filter(|v| !v.is_empty()) {
+        None => String::new(),
+        Some(home) => {
+            let mut h: u32 = 2166136261;
+            for b in home.to_string_lossy().to_lowercase().bytes() {
+                h = (h ^ b as u32).wrapping_mul(16777619);
+            }
+            format!("-{h:08x}")
+        }
+    }
+}
+
 /// Set by Ctrl+C / SIGTERM.
 pub static STOP_SIGNAL: AtomicBool = AtomicBool::new(false);
 
@@ -159,7 +174,7 @@ mod imp {
 
     /// One worker per user: the tray and the CLI share this mutex.
     pub fn single_instance() -> Option<Instance> {
-        named_lock("Local\\ManjiKickWorker.single")
+        named_lock(&format!("Local\\ManjiKickWorker.single{}", super::instance_suffix()))
     }
 
     /// A named mutex this process owns until it is dropped; None if taken.
