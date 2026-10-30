@@ -32,6 +32,9 @@ pub struct Job {
     /// A search job: yt-dlp search strings ("ytsearch10:artist title").
     #[serde(default)]
     pub searches: Vec<String>,
+    /// A Shazam job: the request to send from here {url, headers, body}.
+    #[serde(default)]
+    pub request: Value,
     /// The server's clock; only informational (see `leased_at`).
     #[serde(default)]
     pub expires_at: f64,
@@ -43,6 +46,13 @@ pub struct Job {
 impl Job {
     pub fn is_search(&self) -> bool {
         self.kind.as_deref() == Some("search") && !self.searches.is_empty()
+    }
+    pub fn is_shazam(&self) -> bool {
+        self.kind.as_deref() == Some("shazam") && self.request.is_object()
+    }
+    /// A job a site thread waits on (search, Shazam): run beside the pool.
+    pub fn is_side(&self) -> bool {
+        self.is_search() || self.is_shazam()
     }
 }
 
@@ -163,15 +173,17 @@ impl Api {
     }
 
     /// Up to `want` jobs, and how long the server suggests waiting when none.
-    pub fn lease(&self, want: usize) -> Result<(Vec<Job>, f64, Option<Option<String>>), ApiError> {
-        // "search": this worker also runs YouTube searches (job::run_search).
-        let v = self.post("/lease", &json!({"want": want.clamp(1, MAX_BATCH), "kinds": ["search"]}))?;
+    /// `shazam`: also take Shazam requests (not while Shazam turns us away).
+    pub fn lease(&self, want: usize, shazam: bool) -> Result<(Vec<Job>, f64, Option<Option<String>>), ApiError> {
+        // "search": YouTube searches (job::run_search); "shazam": job::run_shazam.
+        let kinds: &[&str] = if shazam { &["search", "shazam"] } else { &["search"] };
+        let v = self.post("/lease", &json!({"want": want.clamp(1, MAX_BATCH), "kinds": kinds}))?;
         let at = Instant::now();
         let mut jobs = Vec::new();
         let mut unreadable = Vec::new();
         for item in v["jobs"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
             match serde_json::from_value::<Job>(item.clone()) {
-                Ok(mut job) if job.is_search() || !job.clip_url.is_empty() => {
+                Ok(mut job) if job.is_side() || !job.clip_url.is_empty() => {
                     job.leased_at = Some(at);
                     jobs.push(job);
                 }

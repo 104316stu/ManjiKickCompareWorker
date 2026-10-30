@@ -306,6 +306,90 @@ pub fn run_search(sh: &Shared, api: &Api, job: &Job, tools: &Tools) -> f64 {
     }
 }
 
+/// Where a Shazam job may send its request, and the headers it may set.
+const SHAZAM_URL_PREFIX: &str = "https://amp.shazam.com/discovery/v5/";
+const SHAZAM_HEADERS: &[&str] = &["X-Shazam-Platform", "X-Shazam-AppVersion", "Accept", "Accept-Language", "User-Agent"];
+
+/// A Shazam job: the site's recognition request (the clip's signature,
+/// worked out on the site) sent from this address, since Shazam limits each
+/// one. The track goes back cut to the fields the site reads.
+pub fn run_shazam(sh: &Shared, api: &Api, job: &Job) -> f64 {
+    let started = Instant::now();
+    let req = &job.request;
+    let url = req["url"].as_str().unwrap_or("");
+    if !url.starts_with(SHAZAM_URL_PREFIX) || url.chars().any(|c| c.is_whitespace() || c.is_control())
+        || !req["body"].is_object()
+    {
+        hand_back(api, job, "Shazam request not understood");
+        return 0.0;
+    }
+    if sh.dry_run {
+        hand_back(api, job, "dry run, Shazam request");
+        return 0.0;
+    }
+    let agent = crate::api::agent(Duration::from_secs(30));
+    let mut call = agent.post(url).set("Content-Type", "application/json");
+    for name in SHAZAM_HEADERS {
+        if let Some(v) = req["headers"][*name].as_str().filter(|v| v.len() < 300 && !v.chars().any(char::is_control)) {
+            call = call.set(name, v);
+        }
+    }
+    let (status, track) = match call.send_string(&req["body"].to_string()) {
+        Ok(resp) => {
+            let status = resp.status();
+            let body: Value = resp.into_string().ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+            sh.shazam_ok();
+            (status, shazam_track(&body["track"]))
+        }
+        Err(ureq::Error::Status(429, _)) => {
+            let wait = sh.shazam_refused();
+            crate::log!("Shazam turned this machine away (429); no Shazam jobs for {} s", wait as u64);
+            (429, Value::Null)
+        }
+        Err(ureq::Error::Status(code, _)) => (code, Value::Null),
+        Err(e) => {
+            hand_back(api, job, &format!("Shazam not reached ({e})"));
+            return 0.0;
+        }
+    };
+    let total_ms = started.elapsed().as_millis() as u64;
+    let body = json!({"job_id": job.job_id, "lease": job.lease, "shazam": {"status": status, "track": track},
+                      "timing": {"total_ms": total_ms}});
+    match api.result(&body) {
+        Ok(_) => crate::log!("job {} Shazam: {} in {:.1} s", job.job_id,
+            match (status, track["title"].as_str()) {
+                (200, Some(t)) => format!("{} \u{2013} {}", track["subtitle"].as_str().unwrap_or(""), t),
+                (200, None) => "no match".into(),
+                (code, _) => format!("HTTP {code}"),
+            }, total_ms as f64 / 1000.0),
+        Err(ApiError::Auth(c)) => sh.token_rejected(c),
+        Err(e) => crate::log!("job {}: Shazam answer not delivered ({e})", job.job_id),
+    }
+    0.0
+}
+
+/// The parts of a Shazam track the site reads: names, links, ISRC, the
+/// Apple Music actions and the video section.
+fn shazam_track(t: &Value) -> Value {
+    if !t.is_object() {
+        return Value::Null;
+    }
+    let cut = |v: &Value, n: usize| v.as_str().map(|s| Value::String(s.chars().take(n).collect())).unwrap_or(Value::Null);
+    let id = |v: &Value| match v {
+        Value::String(s) => Value::String(s.chars().take(40).collect()),
+        Value::Number(n) => Value::String(n.to_string()),
+        _ => Value::Null,
+    };
+    let actions: Vec<Value> = t["hub"]["actions"].as_array().map(Vec::as_slice).unwrap_or(&[]).iter().take(12)
+        .map(|a| json!({"type": cut(&a["type"], 40), "id": id(&a["id"]), "uri": cut(&a["uri"], 500)}))
+        .collect();
+    let sections: Vec<Value> = t["sections"].as_array().map(Vec::as_slice).unwrap_or(&[]).iter().take(12)
+        .map(|x| json!({"type": cut(&x["type"], 40), "youtubeurl": cut(&x["youtubeurl"], 500)}))
+        .collect();
+    json!({"title": cut(&t["title"], 300), "subtitle": cut(&t["subtitle"], 300), "url": cut(&t["url"], 500),
+           "key": id(&t["key"]), "isrc": cut(&t["isrc"], 20), "hub": {"actions": actions}, "sections": sections})
+}
+
 /// One yt-dlp search, entries only (`--flat-playlist`: no video pages).
 fn youtube_search(cancel: &dyn Fn() -> bool, tools: &Tools, search: &str, folder: &Path,
                   site_cookie: Option<&crate::cookie::SiteCookie>) -> (Search, f64) {
@@ -588,6 +672,21 @@ ERROR: [youtube] abc: Video unavailable https://www.youtube.com/watch?v=abc
 ";
         assert_eq!(first_line(err), "ERROR: [youtube] abc: Video unavailable <url>");
         assert_eq!(first_line(""), "yt-dlp failed");
+    }
+
+    #[test]
+    fn shazam_track_keeps_what_the_site_reads() {
+        let t = json!({"title": "Roses", "subtitle": "The Chainsmokers", "url": "https://www.shazam.com/track/1",
+            "key": 123, "isrc": "USQX91500872", "images": {"big": "x"}, "share": {"text": "long"},
+            "hub": {"actions": [{"type": "applemusicplay", "id": "1440", "name": "x"}, {"type": "uri", "uri": "https://itunes.apple.com/p"}]},
+            "sections": [{"type": "SONG", "metadata": []}, {"type": "VIDEO", "youtubeurl": "https://cdn.shazam.com/video/v3/x"}]});
+        let k = shazam_track(&t);
+        assert_eq!(k["title"], "Roses");
+        assert_eq!(k["key"], "123");
+        assert!(k.get("images").is_none() && k.get("share").is_none());
+        assert_eq!(k["hub"]["actions"][0]["id"], "1440");
+        assert_eq!(k["sections"][1]["youtubeurl"], "https://cdn.shazam.com/video/v3/x");
+        assert_eq!(shazam_track(&Value::Null), Value::Null);
     }
 
     #[test]

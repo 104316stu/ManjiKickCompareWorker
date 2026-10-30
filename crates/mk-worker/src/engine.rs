@@ -70,6 +70,9 @@ pub struct State {
     pub queue: Vec<Job>,
     pub cooldown_until: f64,
     pub cooldown_streak: u32,
+    /// Shazam turned this address away: no Shazam jobs before this.
+    pub shazam_until: f64,
+    pub shazam_streak: u32,
     pub half_until: f64,
     pub today: Today,
     /// Since this machine first ran the worker.
@@ -161,6 +164,8 @@ impl Shared {
                 queue: Vec::new(),
                 cooldown_until: 0.0,
                 cooldown_streak: 0,
+                shazam_until: 0.0,
+                shazam_streak: 0,
                 half_until: 0.0,
                 today,
                 all,
@@ -447,6 +452,19 @@ impl Shared {
     pub fn back_off(&self, secs: f64) {
         let mut st = self.st.lock().unwrap();
         st.lease_after = st.lease_after.max(crate::now() + secs);
+    }
+
+    /// Shazam answered 429: no Shazam jobs for 2 min, doubling, up to 30 min.
+    pub fn shazam_refused(&self) -> f64 {
+        let mut st = self.st.lock().unwrap();
+        st.shazam_streak += 1;
+        let wait = (120.0 * 2f64.powi(st.shazam_streak as i32 - 1)).min(1800.0);
+        st.shazam_until = crate::now() + wait;
+        wait
+    }
+
+    pub fn shazam_ok(&self) {
+        self.st.lock().unwrap().shazam_streak = 0;
     }
 
     pub fn youtube_ok(&self) {
@@ -829,14 +847,15 @@ impl Engine {
                         next_lease = next_lease.max(now + 30.0);
                     }
                 } else if want > 0 && now >= next_lease && now >= lease_after {
-                    match a.lease(want) {
+                    let shazam = now >= sh.st.lock().unwrap().shazam_until;
+                    match a.lease(want, shazam) {
                         Ok((jobs, poll, cookie_version)) => {
                             sh.cookie_version_seen(a, cookie_version);
                             if jobs.is_empty() {
                                 next_lease = now + poll.max(1.0);
                             } else {
                                 crate::log!("leased {} job{}", jobs.len(), if jobs.len() == 1 { "" } else { "s" });
-                                let (searches, compares): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(Job::is_search);
+                                let (searches, compares): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(Job::is_side);
                                 sh.st.lock().unwrap().queue.extend(compares);
                                 for job in searches {
                                     start_search(sh, job);
@@ -927,6 +946,9 @@ fn start_search(sh: &Arc<Shared>, job: Job) {
         let a = Api::new(&server, &token);
         let tools = s.st.lock().unwrap().tools.clone();
         match tools {
+            Some(_) if job.is_shazam() => {
+                crate::job::run_shazam(&s, &a, &job);
+            }
             Some(t) => {
                 crate::job::run_search(&s, &a, &job, &t);
             }
@@ -975,6 +997,8 @@ fn worker_loop(index: usize, sh: Arc<Shared>) {
         if crate::job::lease_left(&job, lease_seconds) < MIN_LEASE_LEFT || tools.is_none() {
             a.release(std::slice::from_ref(&job));
             sh.back_off(10.0);
+        } else if job.is_shazam() {
+            helpers = crate::job::run_shazam(&sh, a, &job);
         } else if job.is_search() {
             helpers = crate::job::run_search(&sh, a, &job, tools.as_ref().unwrap());
         } else {
