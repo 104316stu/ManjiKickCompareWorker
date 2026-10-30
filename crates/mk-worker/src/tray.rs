@@ -18,6 +18,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 const WM_TRAY: u32 = WM_APP + 1;
 /// Sent by a second launch: open the panel of the one already running.
 const WM_OPEN_PANEL: u32 = WM_APP + 2;
+/// `--hide-panel` from a second launch (scripts and timing checks).
+const WM_HIDE_PANEL: u32 = WM_APP + 3;
 const CLASS_NAME: &str = "ManjiKickWorkerTray";
 const TIMER_ID: usize = 1;
 
@@ -418,6 +420,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             0
         }
+        WM_HIDE_PANEL => {
+            crate::popup::hide();
+            0
+        }
         WM_OPEN_PANEL => {
             if !crate::popup::is_visible() && !crate::popup::toggle() {
                 show_menu(hwnd);
@@ -468,7 +474,8 @@ pub fn main() {
             let other = FindWindowW(wide(CLASS_NAME).as_ptr(), std::ptr::null());
             if !other.is_null() {
                 AllowSetForegroundWindow(u32::MAX); // ASFW_ANY
-                PostMessageW(other, WM_OPEN_PANEL, 0, 0);
+                let msg = if std::env::args().any(|a| a == "--hide-panel") { WM_HIDE_PANEL } else { WM_OPEN_PANEL };
+                PostMessageW(other, msg, 0, 0);
             } else {
                 MessageBoxW(std::ptr::null_mut(), wide("The ManjiKick worker is already running (see the tray).").as_ptr(),
                     wide("ManjiKick worker").as_ptr(), MB_OK | MB_ICONINFORMATION);
@@ -533,9 +540,10 @@ pub fn main() {
             std::ptr::null_mut(), std::ptr::null_mut(), hinst, std::ptr::null());
         TRAY_HWND.with(|h| h.set(hwnd));
         notify(hwnd, NIM_ADD, None);
-        crate::popup::init(hwnd, sh.paths.state_dir.join("webview"), popup_command);
-        if std::env::var_os("MKW_POPUP_SELFTEST").is_some() {
-            crate::log!("popup self-test: {}", if crate::popup::prewarm() { "WebView2 created" } else { "failed" });
+        crate::popup::init(hwnd, sh.paths.state_dir.join("webview"), popup_command, popup_state);
+        // Build the panel now, hidden, so the first click shows it at once.
+        if !crate::popup::prewarm() {
+            crate::log!("panel not prepared; it is created on the first click instead");
         }
         if sh.paths.read_token().is_none() {
             notify(hwnd, NIM_MODIFY, Some(("ManjiKick worker", "Connecting this PC to the site...")));

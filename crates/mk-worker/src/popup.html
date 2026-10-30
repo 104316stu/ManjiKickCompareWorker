@@ -185,7 +185,11 @@
     $("who").textContent = d.name ? "as " + d.name : "";
     $("trust-hint").hidden = d.trust !== "Shadow";
   }
-  window.chrome.webview.addEventListener("message", e => render(e.data));
+  window.chrome.webview.addEventListener("message", e => {
+    // The host asks when the next frame is on screen (timing log).
+    if (e.data && e.data.ping) { requestAnimationFrame(() => requestAnimationFrame(() => send("painted"))); return; }
+    render(e.data);
+  });
   send("ready");
 </script>
 </body>

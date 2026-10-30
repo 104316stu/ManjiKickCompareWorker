@@ -27,8 +27,6 @@ const LOGO: &str = include_str!("../../../assets/icon.svg");
 /// Logical size (96 dpi); scaled by the monitor's DPI.
 const WIDTH: i32 = 620;
 const HEIGHT: i32 = 404;
-/// Close WebView2 (and its helper processes) after this long hidden.
-const KEEP_ALIVE: Duration = Duration::from_secs(120);
 
 /// What the page asks for: (cmd, value).
 pub type Handler = fn(&str, &str);
@@ -44,10 +42,15 @@ struct Popup {
     /// Creating WebView2 failed (when): use the menu, retry a bit later.
     failed: Option<Instant>,
     handler: Handler,
+    /// The panel's data as JSON (from the tray).
+    state: fn() -> String,
     data_dir: std::path::PathBuf,
 }
 
 thread_local! {
+    /// When the current open was asked for (click, second launch), for the
+    /// timing lines in the log.
+    static OPENED_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
     static POPUP: RefCell<Option<Popup>> = const { RefCell::new(None) };
 }
 
@@ -56,7 +59,7 @@ fn wide(s: &str) -> Vec<u16> {
 }
 
 /// Sets up the (hidden) popup window. Call once on the tray's UI thread.
-pub fn init(tray: HWND, data_dir: std::path::PathBuf, handler: Handler) {
+pub fn init(tray: HWND, data_dir: std::path::PathBuf, handler: Handler, state: fn() -> String) {
     unsafe {
         let hinst = GetModuleHandleW(std::ptr::null());
         let class = wide("ManjiKickWorkerPopup");
@@ -89,7 +92,7 @@ pub fn init(tray: HWND, data_dir: std::path::PathBuf, handler: Handler) {
         POPUP.with(|p| {
             *p.borrow_mut() = Some(Popup {
                 hwnd, tray, controller: None, webview: None, visible: false, ready: false,
-                hidden_at: None, failed: hwnd.is_null().then(Instant::now), handler, data_dir,
+                hidden_at: None, failed: hwnd.is_null().then(Instant::now), handler, state, data_dir,
             })
         });
     }
@@ -171,8 +174,30 @@ fn on_page(cmd: &str, value: &str, handler: Handler) {
                 }
             });
             handler("refresh", "");
+            POPUP.with(|p| {
+                if let Ok(b) = p.try_borrow() {
+                    if let Some(p) = b.as_ref() {
+                        if let Some(w) = &p.webview {
+                            let _ = unsafe { w.PostWebMessageAsJson(&HSTRING::from((p.state)())) };
+                        }
+                    }
+                }
+            });
+            crate::log!("panel: page loaded {} ms after start or click", since_click());
+            POPUP.with(|p| {
+                if let Ok(b) = p.try_borrow() {
+                    if let Some(w) = b.as_ref().and_then(|p| p.webview.as_ref()) {
+                        ping(w);
+                    }
+                }
+            });
         }
         "hide" => hide(),
+        "painted" => {
+            if let Some(t) = OPENED_AT.with(|o| o.take()) {
+                crate::log!("panel: painted {} ms after the click", t.elapsed().as_millis());
+            }
+        }
         _ => handler(cmd, value),
     }
 }
@@ -193,13 +218,39 @@ pub fn toggle() -> bool {
     if hidden_at.is_some_and(|t| t.elapsed() < Duration::from_millis(350)) {
         return true;
     }
+    OPENED_AT.with(|o| o.set(Some(Instant::now())));
+    crate::log!("panel: click");
     show()
 }
 
-/// Creates WebView2 without showing it (MKW_POPUP_SELFTEST=1 checks this
-/// machine can host the panel; the result is logged).
+/// LOW while hidden keeps the kept-alive panel small; NORMAL while shown.
+fn memory_level(w: &ICoreWebView2, low: bool) {
+    if let Ok(w19) = windows_core::Interface::cast::<ICoreWebView2_19>(w) {
+        let level = if low { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW } else { COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL };
+        let _ = unsafe { w19.SetMemoryUsageTargetLevel(level) };
+    }
+}
+
+fn since_click() -> u128 {
+    OPENED_AT.with(|o| o.get()).map(|t| t.elapsed().as_millis()).unwrap_or(0)
+}
+
+/// Asks the page to report its next painted frame ("painted").
+fn ping(w: &ICoreWebView2) {
+    let _ = unsafe { w.PostWebMessageAsJson(&HSTRING::from("{\"ping\":1}")) };
+}
+
+/// Creates the panel hidden at startup, so a click only has to show it.
 pub fn prewarm() -> bool {
-    ensure_webview()
+    let ok = ensure_webview();
+    POPUP.with(|p| {
+        if let Ok(b) = p.try_borrow() {
+            if let Some(w) = b.as_ref().and_then(|p| p.webview.as_ref()) {
+                memory_level(w, true);
+            }
+        }
+    });
+    ok
 }
 
 fn show() -> bool {
@@ -214,7 +265,12 @@ fn ensure_webview() -> bool {
     let need = POPUP.with(|p| p.borrow().as_ref().map(|p| (p.controller.is_none(), p.hwnd, p.data_dir.clone(), p.handler)));
     let Some((need, hwnd, data_dir, handler)) = need else { return false };
     if need {
-        match create_webview(hwnd, &data_dir, handler) {
+        let t = Instant::now();
+        let made = create_webview(hwnd, &data_dir, handler);
+        if made.is_ok() {
+            crate::log!("panel: WebView2 created in {} ms", t.elapsed().as_millis());
+        }
+        match made {
             Ok((c, w)) => POPUP.with(|p| {
                 if let Some(p) = p.borrow_mut().as_mut() {
                     if p.failed.take().is_some() {
@@ -247,16 +303,32 @@ fn show_window() -> bool {
             let dpi = GetDpiForWindow(p.hwnd).max(96) as i32;
             let (w, h) = (WIDTH * dpi / 96, HEIGHT * dpi / 96);
             let (x, y) = place(p.tray, w, h, 8 * dpi / 96);
-            SetWindowPos(p.hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
+            // Bounds first while hidden, then show: no layout work on screen.
             if let Some(c) = &p.controller {
                 let _ = c.SetBounds(WRECT { left: 0, top: 0, right: w, bottom: h });
+            }
+            SetWindowPos(p.hwnd, HWND_TOPMOST, x, y, w, h, SWP_SHOWWINDOW);
+            SetForegroundWindow(p.hwnd);
+            if let Some(c) = &p.controller {
                 let _ = c.SetIsVisible(true);
                 let _ = c.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
             }
-            SetForegroundWindow(p.hwnd);
+            if let Some(wv) = &p.webview {
+                memory_level(wv, false);
+                if p.ready {
+                    // Fresh numbers right away (the page already shows the last ones).
+                    let _ = wv.PostWebMessageAsJson(&HSTRING::from((p.state)()));
+                }
+            }
         }
         p.visible = true;
         p.hidden_at = None;
+        crate::log!("panel: window shown {} ms after the click", since_click());
+        if p.ready {
+            if let Some(w) = &p.webview {
+                ping(w);
+            }
+        }
         true
     })
 }
@@ -308,6 +380,9 @@ pub fn hide() {
                 if let Some(c) = &p.controller {
                     let _ = unsafe { c.SetIsVisible(false) };
                 }
+                if let Some(w) = &p.webview {
+                    memory_level(w, true);
+                }
                 p.visible = false;
                 p.hidden_at = Some(Instant::now());
             }
@@ -319,8 +394,8 @@ pub fn is_visible() -> bool {
     POPUP.with(|p| p.try_borrow().map(|b| b.as_ref().is_some_and(|p| p.visible)).unwrap_or(true))
 }
 
-/// Every second from the tray's timer: fresh data while open; free
-/// WebView2 after a while closed.
+/// Every second from the tray's timer: fresh data while open, nothing
+/// while hidden (the panel is kept, at low memory, so it opens instantly).
 pub fn tick(state: impl FnOnce() -> String) {
     POPUP.with(|p| {
         let Ok(mut b) = p.try_borrow_mut() else { return };
@@ -329,12 +404,6 @@ pub fn tick(state: impl FnOnce() -> String) {
             if let Some(w) = &p.webview {
                 let _ = unsafe { w.PostWebMessageAsJson(&HSTRING::from(state())) };
             }
-        } else if !p.visible && p.controller.is_some() && p.hidden_at.is_some_and(|t| t.elapsed() > KEEP_ALIVE) {
-            if let Some(c) = p.controller.take() {
-                let _ = unsafe { c.Close() };
-            }
-            p.webview = None;
-            p.ready = false;
         }
     });
 }
