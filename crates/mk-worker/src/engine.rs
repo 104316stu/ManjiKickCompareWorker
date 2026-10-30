@@ -18,8 +18,6 @@ const MIN_LEASE_LEFT: f64 = 75.0;
 const AUTO_IDLE_SECONDS: f64 = 300.0;
 /// Max halves its threads this long after a YouTube cooldown.
 const HALF_AFTER_COOLDOWN: f64 = 1800.0;
-/// yt-dlp places searches may use past youtube_at_once.
-const SEARCH_EXTRA: usize = 2;
 /// Search jobs running at once, each on its own thread beside the pool.
 const SEARCHES_AT_ONCE: usize = 4;
 
@@ -118,11 +116,9 @@ pub struct Shared {
     pub site_cookie: Mutex<Option<Arc<crate::cookie::SiteCookie>>>,
     /// A bot check hit while holding no cookie: ask /hello again (when).
     pub cookie_recheck: Mutex<Option<f64>>,
-    /// yt-dlp runs going now (config youtube_at_once caps them).
+    /// Downloads going now (config youtube_at_once caps them).
     youtube_running: Mutex<usize>,
     youtube_free: Condvar,
-    /// Searches waiting for a place: downloads let them go first.
-    searches_waiting: Mutex<usize>,
 }
 
 /// A place among the yt-dlp runs allowed at once; freed when dropped.
@@ -131,7 +127,7 @@ pub struct YoutubeSlot<'a>(&'a Shared);
 impl Drop for YoutubeSlot<'_> {
     fn drop(&mut self) {
         *self.0.youtube_running.lock().unwrap() -= 1;
-        self.0.youtube_free.notify_all();
+        self.0.youtube_free.notify_one();
     }
 }
 
@@ -155,7 +151,6 @@ impl Shared {
             cookie_recheck: Mutex::new(None),
             youtube_running: Mutex::new(0),
             youtube_free: Condvar::new(),
-            searches_waiting: Mutex::new(0),
             st: Mutex::new(State {
                 phase: Phase::Starting,
                 policy,
@@ -365,39 +360,23 @@ impl Shared {
         }
     }
 
-    /// Waits for a free yt-dlp place (the other threads keep comparing
-    /// meanwhile); None when the work was cancelled while waiting. A search
-    /// (`search`) has a site thread waiting on it: it goes ahead of any
-    /// download and may use SEARCH_EXTRA places past the limit, a search
-    /// being one short page rather than a whole video.
-    pub fn youtube_slot(&self, search: bool) -> Option<YoutubeSlot<'_>> {
+    /// Waits for a free place among the downloads allowed at once (the
+    /// other threads keep comparing meanwhile); None when the work was
+    /// cancelled while waiting. Searches don't take one: a search is one
+    /// short page, and a site thread waits on it.
+    pub fn youtube_slot(&self) -> Option<YoutubeSlot<'_>> {
         let mut running = self.youtube_running.lock().unwrap();
-        if search {
-            *self.searches_waiting.lock().unwrap() += 1;
-        }
-        let slot = loop {
+        loop {
             let limit = self.cfg.lock().unwrap().youtube_at_once;
-            let searches_waiting = *self.searches_waiting.lock().unwrap();
-            let free = if search {
-                limit == 0 || *running < limit + SEARCH_EXTRA
-            } else {
-                limit == 0 || (*running < limit && searches_waiting == 0)
-            };
-            if free {
+            if limit == 0 || *running < limit {
                 *running += 1;
-                break Some(YoutubeSlot(self));
+                return Some(YoutubeSlot(self));
             }
             if self.cancelled() {
-                break None;
+                return None;
             }
             running = self.youtube_free.wait_timeout(running, Duration::from_millis(500)).unwrap().0;
-        };
-        if search {
-            *self.searches_waiting.lock().unwrap() -= 1;
-            // Downloads held back for this search may go now.
-            self.youtube_free.notify_all();
         }
-        slot
     }
 
     pub fn add_download(&self, bytes: u64) {
