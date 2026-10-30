@@ -365,8 +365,10 @@ unsafe fn place(tray: HWND, w: i32, h: i32, gap: i32) -> (i32, i32) {
         x = work.left + gap; // on the left
         y = cy - h / 2;
     }
-    x = x.clamp(work.left + gap, (work.right - w - gap).max(work.left));
-    y = y.clamp(work.top + gap, (work.bottom - h - gap).max(work.top));
+    // Not clamp(): it panics when the work area is smaller than the panel
+    // (or GetMonitorInfo left it empty).
+    x = x.min(work.right - w - gap).max(work.left + gap);
+    y = y.min(work.bottom - h - gap).max(work.top + gap);
     (x, y)
 }
 

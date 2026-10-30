@@ -191,7 +191,7 @@ pub fn relaunch(exe: &Path) -> Result<(), String> {
     #[cfg(windows)]
     {
         let mut cmd = std::process::Command::new(exe);
-        cmd.args(&args).env("MKW_UPDATED", "1");
+        cmd.args(&args).env("MKW_UPDATED", "1").env_remove("MKW_CHILD");
         match crate::proc::spawn_outside(&mut cmd, windows_sys::Win32::System::Threading::DETACHED_PROCESS) {
             Ok(_) => Ok(()),
             Err(e) => {

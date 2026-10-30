@@ -94,10 +94,15 @@ pub fn stop_running() {
     let _ = std::fs::write(paths.stop_file(), "stop\n");
     let until = Instant::now() + Duration::from_secs(30);
     while Instant::now() < until {
+        // Both the worker and its supervisor have to be gone.
         if let Some(lock) = crate::platform::single_instance() {
+            if let Some(sup) = crate::platform::named_lock("Local\\ManjiKickWorker.supervisor") {
+                drop(sup);
+                drop(lock);
+                let _ = std::fs::remove_file(paths.stop_file());
+                return;
+            }
             drop(lock);
-            let _ = std::fs::remove_file(paths.stop_file());
-            return;
         }
         std::thread::sleep(Duration::from_millis(300));
     }
@@ -139,7 +144,7 @@ pub fn install_self() -> Result<PathBuf, String> {
 
 pub fn launch(exe: &Path) -> bool {
     let mut cmd = std::process::Command::new(exe);
-    cmd.env("MKW_UPDATED", "1");
+    cmd.env("MKW_UPDATED", "1").env_remove("MKW_CHILD");
     crate::proc::spawn_outside(&mut cmd, 0).is_ok()
 }
 

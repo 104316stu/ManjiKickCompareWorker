@@ -431,6 +431,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             0
         }
         WM_TIMER => {
+            // A file named crash-test in the data folder makes the worker
+            // panic once: checks the crash log and the automatic restart.
+            let trigger = shared().paths.state_dir.join("crash-test");
+            if trigger.exists() {
+                let _ = std::fs::remove_file(&trigger);
+                panic!("crash test requested");
+            }
             notify(hwnd, NIM_MODIFY, None);
             crate::popup::tick(popup_state);
             if shared().quitting() {
@@ -464,8 +471,16 @@ pub fn main() {
     let paths = Paths::get();
     paths.create_all();
     crate::logging::init(&paths.log_file, false);
+    crate::logging::install_panic_hook();
     if !crate::install::is_installed_copy() {
         run_downloaded_copy();
+        return;
+    }
+    // The program started from the shortcut or at login supervises a child
+    // copy that does the work (and owns the tray icon), and restarts it if
+    // it ever dies.
+    if std::env::var_os("MKW_CHILD").is_none() && std::env::var_os("MKW_NO_SUPERVISOR").is_none() {
+        supervise();
         return;
     }
     let Some(_instance) = crate::platform::single_instance_after_update() else {
@@ -616,5 +631,92 @@ fn run_downloaded_copy() {
                     wide("ManjiKick Worker").as_ptr(), MB_OK | MB_ICONWARNING);
             }
         }
+    }
+}
+
+/// Exit code the child uses for a deliberate quit (menu, uninstall, update):
+/// anything else is a crash and gets restarted.
+const SUPERVISOR_LOCK: &str = "Local\\ManjiKickWorker.supervisor";
+
+fn open_running_panel() -> bool {
+    unsafe {
+        let other = FindWindowW(wide(CLASS_NAME).as_ptr(), std::ptr::null());
+        if other.is_null() {
+            return false;
+        }
+        AllowSetForegroundWindow(u32::MAX); // ASFW_ANY
+        let msg = if std::env::args().any(|a| a == "--hide-panel") { WM_HIDE_PANEL } else { WM_OPEN_PANEL };
+        PostMessageW(other, msg, 0, 0);
+        true
+    }
+}
+
+/// Runs the worker as a child process and starts it again after a crash:
+/// 5 s, doubling up to 5 min; after 5 crashes within 10 min it gives up and
+/// says so. A normal exit (Quit, Uninstall, an update handing over) ends it.
+fn supervise() {
+    let updated = std::env::var_os("MKW_UPDATED").is_some();
+    let mut lock = crate::platform::named_lock(SUPERVISOR_LOCK);
+    // Right after an update the previous supervisor may still be exiting.
+    let mut tries = 0;
+    while lock.is_none() && updated && tries < 60 {
+        std::thread::sleep(Duration::from_millis(500));
+        lock = crate::platform::named_lock(SUPERVISOR_LOCK);
+        tries += 1;
+    }
+    let Some(_lock) = lock else {
+        // Already running: a second launch opens the panel.
+        if !open_running_panel() {
+            unsafe {
+                MessageBoxW(std::ptr::null_mut(), wide("The ManjiKick worker is already running (see the tray).").as_ptr(),
+                    wide("ManjiKick worker").as_ptr(), MB_OK | MB_ICONINFORMATION);
+            }
+        }
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else { return };
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut crashes: std::collections::VecDeque<Instant> = std::collections::VecDeque::new();
+    let mut delay = 5u64;
+    let mut first = true;
+    loop {
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.args(&args).env("MKW_CHILD", "1");
+        if !first {
+            cmd.env_remove("MKW_UPDATED");
+        }
+        first = false;
+        let started = Instant::now();
+        let status = match crate::proc::spawn_outside(&mut cmd, 0).and_then(|mut c| c.wait()) {
+            Ok(s) => s,
+            Err(e) => {
+                crate::log!("supervisor: could not start the worker: {e}");
+                return;
+            }
+        };
+        if status.success() {
+            return; // Quit, Uninstall, or an update that started the new version
+        }
+        let code = status.code().map(|c| format!("0x{:08X}", c as u32)).unwrap_or_else(|| "?".into());
+        // A child that ran a while resets the backoff.
+        if started.elapsed() > Duration::from_secs(600) {
+            delay = 5;
+        }
+        crashes.push_back(Instant::now());
+        while crashes.front().is_some_and(|t| t.elapsed() > Duration::from_secs(600)) {
+            crashes.pop_front();
+        }
+        if crashes.len() >= 5 {
+            crate::log!("supervisor: the worker stopped unexpectedly 5 times in 10 minutes (last exit {code}); giving up");
+            unsafe {
+                MessageBoxW(std::ptr::null_mut(),
+                    wide("ManjiKick Worker keeps stopping, so it was not restarted.\n\nThe log folder (%LOCALAPPDATA%\\ManjiKickWorker\\log) has the details.").as_ptr(),
+                    wide("ManjiKick Worker").as_ptr(), MB_OK | MB_ICONWARNING);
+            }
+            return;
+        }
+        crate::log!("supervisor: the worker stopped unexpectedly (exit {code}); restarting in {delay} s");
+        std::thread::sleep(Duration::from_secs(delay));
+        delay = (delay * 2).min(300);
     }
 }

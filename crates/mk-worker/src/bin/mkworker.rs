@@ -51,6 +51,7 @@ fn die(msg: &str) -> ! {
 }
 
 fn main() {
+    mkworker::logging::install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if cfg!(windows) {
         mkworker::update::set_asset("mkworker.exe");

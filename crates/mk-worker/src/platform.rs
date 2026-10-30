@@ -159,7 +159,12 @@ mod imp {
 
     /// One worker per user: the tray and the CLI share this mutex.
     pub fn single_instance() -> Option<Instance> {
-        let name: Vec<u16> = "Local\\ManjiKickWorker.single".encode_utf16().chain(Some(0)).collect();
+        named_lock("Local\\ManjiKickWorker.single")
+    }
+
+    /// A named mutex this process owns until it is dropped; None if taken.
+    pub fn named_lock(name: &str) -> Option<Instance> {
+        let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
         unsafe {
             let h = CreateMutexW(std::ptr::null(), 1, name.as_ptr());
             if h.is_null() {

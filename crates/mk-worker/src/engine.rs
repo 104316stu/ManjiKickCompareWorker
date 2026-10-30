@@ -380,7 +380,7 @@ impl Load {
         let now = Instant::now();
         let cpu = platform::family_cpu_seconds();
         if let Some((busy, total)) = platform::system_ticks() {
-            if let Some((b0, t0, c0, i0)) = self.last {
+            if let Some((b0, t0, c0, i0)) = self.last.filter(|l| busy >= l.0 && total >= l.1) {
                 let dt = (total - t0) as f64;
                 let wall = now.duration_since(i0).as_secs_f64() * config::cores() as f64;
                 if dt > 0.0 && wall > 0.0 {
@@ -827,18 +827,19 @@ fn worker_loop(index: usize, sh: Arc<Shared>) {
         }
         let used = platform::thread_cpu_seconds() - cpu0 + helpers;
         let duty = sh.cfg.lock().unwrap().duty;
-        let rest = if duty < 1.0 { used * (1.0 - duty) / duty } else { 0.0 };
+        let rest = if duty > 0.0 && duty < 1.0 { used.max(0.0) * (1.0 - duty) / duty } else { 0.0 };
         {
             let mut st = sh.st.lock().unwrap();
-            st.busy -= 1;
+            st.busy = st.busy.saturating_sub(1);
             st.resting += (rest > 0.0) as usize;
         }
         if rest > 0.0 {
-            let end = Instant::now() + Duration::from_secs_f64(rest.min(3600.0));
+            let end = Instant::now() + Duration::from_secs_f64(if rest.is_finite() { rest.clamp(0.0, 3600.0) } else { 0.0 });
             while Instant::now() < end && !sh.quitting() {
                 std::thread::sleep(Duration::from_millis(250));
             }
-            sh.st.lock().unwrap().resting -= 1;
+            let mut st = sh.st.lock().unwrap();
+            st.resting = st.resting.saturating_sub(1);
         }
     }
 }

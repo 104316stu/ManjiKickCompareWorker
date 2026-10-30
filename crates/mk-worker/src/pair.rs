@@ -74,8 +74,8 @@ pub fn start(server: &str, name: &str) -> Result<Started, String> {
         code: field("code")?,
         poll_id: field("poll_id")?,
         approve_url,
-        expires_in: v["expires_in"].as_f64().unwrap_or(600.0),
-        poll_seconds: v["poll_seconds"].as_f64().unwrap_or(3.0).clamp(1.0, 30.0),
+        expires_in: v["expires_in"].as_f64().filter(|x| x.is_finite()).unwrap_or(600.0).clamp(0.0, 3600.0),
+        poll_seconds: v["poll_seconds"].as_f64().filter(|x| x.is_finite()).unwrap_or(3.0).clamp(1.0, 30.0),
     })
 }
 

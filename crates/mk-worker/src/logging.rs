@@ -43,3 +43,30 @@ pub fn status(message: &str) {
     }
     line(message);
 }
+
+/// Writes any panic (message, thread, file and line) to the log before the
+/// process ends: the tray has no console, so otherwise it would vanish
+/// without a word.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let name = thread.name().unwrap_or("unnamed").to_string();
+        let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "(no message)".to_string()
+        };
+        let place = info.location().map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column())).unwrap_or_default();
+        // No backtrace: release builds carry no symbols, so file and line it is.
+        line(&format!("PANIC in thread '{name}' at {place}: {msg}"));
+        if let Ok(mut guard) = FILE.lock() {
+            if let Some(f) = guard.as_mut() {
+                let _ = f.flush();
+                let _ = f.sync_all();
+            }
+        }
+        eprintln!("mkworker: panic in thread '{name}' at {place}: {msg}");
+    }));
+}
