@@ -68,6 +68,13 @@ pub struct Hello {
     pub max_video_seconds: Option<u32>,
     pub video_max_bytes: Option<u64>,
     pub lease_seconds: Option<f64>,
+    /// None: the reply had no cookie_version; Some(None): no cookie for us.
+    pub cookie_version: Option<Option<String>>,
+}
+
+/// The reply's cookie_version, if it has the field at all.
+fn cookie_version(v: &Value) -> Option<Option<String>> {
+    v.as_object()?.get("cookie_version").map(|c| c.as_str().map(str::to_string))
 }
 
 pub fn agent(read_timeout: Duration) -> ureq::Agent {
@@ -139,11 +146,12 @@ impl Api {
             max_video_seconds: limits["max_video_seconds"].as_u64().map(|n| n as u32),
             video_max_bytes: limits["video_max_bytes"].as_u64(),
             lease_seconds: v["lease_seconds"].as_f64(),
+            cookie_version: cookie_version(&v),
         })
     }
 
     /// Up to `want` jobs, and how long the server suggests waiting when none.
-    pub fn lease(&self, want: usize) -> Result<(Vec<Job>, f64), ApiError> {
+    pub fn lease(&self, want: usize) -> Result<(Vec<Job>, f64, Option<Option<String>>), ApiError> {
         let v = self.post("/lease", &json!({"want": want.clamp(1, MAX_BATCH)}))?;
         let at = Instant::now();
         let mut jobs = Vec::new();
@@ -167,7 +175,7 @@ impl Api {
             let _ = self.post("/release", &json!({ "jobs": unreadable }));
         }
         let poll = v["poll_after_seconds"].as_f64().unwrap_or(60.0);
-        Ok((jobs, poll))
+        Ok((jobs, poll, cookie_version(&v)))
     }
 
     pub fn clip(&self, job: &Job) -> Result<Vec<u8>, ApiError> {
@@ -203,6 +211,11 @@ impl Api {
             }
         }
         Ok(bytes)
+    }
+
+    /// The encrypted cookie for our one-time public key (see cookie.rs).
+    pub fn cookie(&self, public_b64: &str) -> Result<Value, ApiError> {
+        self.post("/cookie", &json!({ "public": public_b64 }))
     }
 
     pub fn result(&self, body: &Value) -> Result<Value, ApiError> {

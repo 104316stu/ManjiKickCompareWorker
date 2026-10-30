@@ -108,6 +108,10 @@ pub struct Shared {
     pub interactive: bool,
     pub quit: AtomicBool,
     pub st: Mutex<State>,
+    /// The site's YouTube cookie (trusted workers), in memory only.
+    pub site_cookie: Mutex<Option<Arc<crate::cookie::SiteCookie>>>,
+    /// A bot check hit while holding no cookie: ask /hello again (when).
+    pub cookie_recheck: Mutex<Option<f64>>,
 }
 
 impl Shared {
@@ -126,6 +130,8 @@ impl Shared {
             dry_run,
             interactive,
             quit: AtomicBool::new(false),
+            site_cookie: Mutex::new(None),
+            cookie_recheck: Mutex::new(None),
             st: Mutex::new(State {
                 phase: Phase::Starting,
                 policy,
@@ -285,6 +291,55 @@ impl Shared {
         st.last = Some(format!("{}: {}", job.video_id, verdict));
     }
 
+    /// Where yt-dlp's cookie comes from now, for the panel.
+    pub fn youtube_signin(&self) -> &'static str {
+        if std::env::var_os("MKW_COOKIES").is_some_and(|p| std::path::Path::new(&p).is_file()) {
+            "signed in (cookie file)"
+        } else if self.site_cookie.lock().unwrap().is_some() {
+            "signed in (site cookie)"
+        } else {
+            "not signed in"
+        }
+    }
+
+    /// Acts on a cookie_version from /hello or /lease: fetch a new cookie
+    /// when it changed, drop ours when there is none (or we aren't trusted).
+    pub fn cookie_version_seen(&self, api: &Api, seen: Option<Option<String>>) {
+        let Some(seen) = seen else { return };
+        let held = self.site_cookie.lock().unwrap().as_ref().map(|c| c.version.clone());
+        match seen {
+            None => {
+                if held.is_some() {
+                    crate::log!("site cookie withdrawn");
+                    *self.site_cookie.lock().unwrap() = None;
+                }
+            }
+            Some(v) if held.as_deref() == Some(v.as_str()) => {}
+            Some(_) => match crate::cookie::fetch(api) {
+                Ok(crate::cookie::Fetched::Cookie(c)) => {
+                    crate::log!("site cookie received (version {})", c.version);
+                    *self.site_cookie.lock().unwrap() = Some(Arc::new(c));
+                }
+                Ok(crate::cookie::Fetched::None) => {
+                    *self.site_cookie.lock().unwrap() = None;
+                }
+                Err(e) => crate::log!("site cookie not fetched: {e}"),
+            },
+        }
+    }
+
+    /// YouTube asked this machine to sign in while it had no cookie: ask
+    /// the site again soon (at most every 10 minutes).
+    pub fn bot_check_without_cookie(&self) {
+        if self.site_cookie.lock().unwrap().is_some() || std::env::var_os("MKW_COOKIES").is_some() {
+            return;
+        }
+        let mut next = self.cookie_recheck.lock().unwrap();
+        if next.is_none() {
+            *next = Some(crate::now());
+        }
+    }
+
     pub fn add_download(&self, bytes: u64) {
         let mut st = self.st.lock().unwrap();
         st.today.bytes += bytes;
@@ -332,6 +387,7 @@ impl Shared {
             "startup": startup,
             "connected": st.server_name.is_some(), "name": st.server_name, "trust": trust,
             "update": st.update_text, "version": env!("CARGO_PKG_VERSION"),
+            "youtube": self.youtube_signin(),
             "server": cfg.server,
         })
     }
@@ -429,6 +485,7 @@ impl Engine {
         let mut sensed = (false, false, false, false); // fullscreen, battery, free, busy
         let mut priority_idle: Option<bool> = None;
         let mut last_phase = Phase::Starting;
+        let mut pending_cookie: Option<Option<String>> = None;
         // The first check waits a minute so a fresh start settles first.
         let mut next_update = crate::now() + 60.0;
         crate::update::clean_old();
@@ -494,6 +551,7 @@ impl Engine {
                                 st.max_video_seconds = h.max_video_seconds.map(|m| m.min(cfg_max)).unwrap_or(cfg_max);
                                 st.video_max_bytes = h.video_max_bytes.unwrap_or(80 * 1024 * 1024);
                                 st.lease_seconds = h.lease_seconds.filter(|s| *s >= 30.0).unwrap_or(180.0);
+                                pending_cookie = h.cookie_version.clone();
                                 st.server_name = Some(h.name);
                                 st.ever_connected = true;
                                 st.trust = Some(h.trust);
@@ -614,6 +672,29 @@ impl Engine {
                 }
             }
 
+            // Cookie news from /hello (fetched outside the state lock).
+            if let (Some(seen), Some(a)) = (pending_cookie.take(), &api) {
+                sh.cookie_version_seen(a, Some(seen));
+            }
+            let recheck = {
+                let mut next = sh.cookie_recheck.lock().unwrap();
+                match *next {
+                    Some(t) if now >= t && api.is_some() => {
+                        *next = None;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if recheck {
+                if let Some(a) = &api {
+                    let threads = sh.st.lock().unwrap().threads;
+                    if let Ok(h) = a.hello(threads, crate::core::ALGO_VERSION) {
+                        sh.cookie_version_seen(a, h.cookie_version);
+                    }
+                }
+            }
+
             // Sensors and policy.
             if now >= next_sense {
                 next_sense = now + 5.0;
@@ -705,7 +786,8 @@ impl Engine {
                     }
                 } else if want > 0 && now >= next_lease && now >= lease_after {
                     match a.lease(want) {
-                        Ok((jobs, poll)) => {
+                        Ok((jobs, poll, cookie_version)) => {
+                            sh.cookie_version_seen(a, cookie_version);
                             if jobs.is_empty() {
                                 next_lease = now + poll.max(3.0);
                             } else {

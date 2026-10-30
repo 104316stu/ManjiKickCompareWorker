@@ -112,6 +112,7 @@
     <div class="trust" id="trust-box" hidden>
       <div><span class="tlab">Trust</span> <b id="trust"></b><span class="who" id="who"></span></div>
       <div class="hint" id="trust-hint" hidden>Shadow: only checked against the site. The site owner can trust this PC.</div>
+      <div><span class="tlab">YouTube</span> <span id="yt"></span></div>
     </div>
   </section>
 
@@ -184,6 +185,7 @@
     $("trust").textContent = d.trust || "";
     $("who").textContent = d.name ? "as " + d.name : "";
     $("trust-hint").hidden = d.trust !== "Shadow";
+    $("yt").textContent = d.youtube || "";
   }
   window.chrome.webview.addEventListener("message", e => {
     // The host asks when the next frame is on screen (timing log).

@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod config;
+pub mod cookie;
 pub mod core;
 pub mod engine;
 pub mod job;

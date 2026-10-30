@@ -112,8 +112,9 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
     let t = Instant::now();
     // The whole job has to land inside its lease.
     let left = (lease_left(job, lease_seconds) - 50.0).clamp(20.0, 240.0);
+    let site_cookie = sh.site_cookie.lock().unwrap().clone();
     let (dl, cpu) = download(&|| sh.cancelled(), tools, &job.video_id, &folder, max_video, max_bytes,
-        Duration::from_secs_f64(left));
+        Duration::from_secs_f64(left), site_cookie.as_deref());
     let download_ms = t.elapsed().as_millis() as u64;
     match dl {
         Download::Ok(path) => {
@@ -156,6 +157,7 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
         Download::Refused(msg) => {
             let _ = std::fs::remove_dir_all(&folder);
             api.release(std::slice::from_ref(job));
+            sh.bot_check_without_cookie();
             let wait = sh.youtube_refused();
             crate::log!("YouTube refused this machine ({msg}); pausing {} s", wait as u64);
         }
@@ -230,7 +232,7 @@ fn post(sh: &Shared, api: &Api, job: &Job, verdict: &str, result: Map<String, Va
 }
 
 fn download(cancel: &dyn Fn() -> bool, tools: &Tools, video_id: &str, folder: &Path, max_video: u32, max_bytes: u64,
-            limit: Duration) -> (Download, f64) {
+            limit: Duration, site_cookie: Option<&crate::cookie::SiteCookie>) -> (Download, f64) {
     let out = folder.join("out.txt");
     let err = folder.join("err.txt");
     let (Ok(fo), Ok(fe)) = (std::fs::File::create(&out), std::fs::File::create(&err)) else {
@@ -260,12 +262,25 @@ fn download(cancel: &dyn Fn() -> bool, tools: &Tools, video_id: &str, folder: &P
     // An optional YouTube cookie file (Netscape format) for machines whose
     // address YouTube asks to sign in; yt-dlp may rewrite it, so it's used
     // from its own path and never sent anywhere else.
+    // The site's cookie (trusted workers) goes to a one-run file that is
+    // deleted when yt-dlp is done (`_cookie_file` is dropped at the end of
+    // this function, whatever happens). A local MKW_COOKIES wins.
+    let mut _cookie_file = None;
     if let Some(cookies) = std::env::var_os("MKW_COOKIES").filter(|p| Path::new(p).is_file()) {
         cmd.arg("--cookies").arg(cookies);
+    } else if let Some(c) = site_cookie {
+        match crate::cookie::write_temp(c, folder) {
+            Ok(f) => {
+                cmd.arg("--cookies").arg(f.path());
+                _cookie_file = Some(f);
+            }
+            Err(e) => crate::log!("site cookie not usable for this download: {e}"),
+        }
     }
     // The id goes after "--" so it can never be read as an option.
     cmd.arg("--").arg(format!("https://www.youtube.com/watch?v={video_id}"));
     let (status, cpu) = crate::proc::run(&mut cmd, Instant::now() + limit, cancel);
+    drop(_cookie_file.take());
     // Lossy: one byte that isn't UTF-8 (a curly quote in the console's code
     // page) must not blank the whole message.
     let read = |p: &Path| String::from_utf8_lossy(&std::fs::read(p).unwrap_or_default()).into_owned();
@@ -324,7 +339,7 @@ pub fn probe(paths: &crate::paths::Paths, tools: &Tools, video_id: &str) -> Resu
     std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
     let t = Instant::now();
     let (dl, _) = download(&|| crate::platform::stop_requested(), tools, video_id, &folder, 1800, 80 * 1024 * 1024,
-        Duration::from_secs(150));
+        Duration::from_secs(150), None);
     let download_s = t.elapsed().as_secs_f64();
     let out = match dl {
         Download::Ok(path) => {
