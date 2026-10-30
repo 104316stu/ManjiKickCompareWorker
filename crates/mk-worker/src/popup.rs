@@ -243,7 +243,11 @@ fn on_page(cmd: &str, value: &str, handler: Handler) {
 
 /// True when the popup is (now) shown; false means use the menu instead.
 pub fn toggle() -> bool {
-    let state = POPUP.with(|p| p.borrow().as_ref().map(|p| (p.visible, p.failed, p.hidden_at)));
+    // A click can arrive while show_window() holds the state (SetWindowPos
+    // and focus changes run window messages): the panel is opening, so the
+    // click is spent.
+    let state = POPUP.with(|p| p.try_borrow().map(|b| b.as_ref().map(|p| (p.visible, p.failed, p.hidden_at))));
+    let Ok(state) = state else { return true };
     let Some((visible, failed, hidden_at)) = state else { return false };
     if failed.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
         return false;
@@ -301,7 +305,7 @@ fn show() -> bool {
 
 fn ensure_webview() -> bool {
     // Create on first use (and again after it was closed to save memory).
-    let need = POPUP.with(|p| p.borrow().as_ref().map(|p| (p.controller.is_none(), p.hwnd, p.data_dir.clone(), p.handler)));
+    let need = POPUP.with(|p| p.try_borrow().ok().and_then(|b| b.as_ref().map(|p| (p.controller.is_none(), p.hwnd, p.data_dir.clone(), p.handler))));
     let Some((need, hwnd, data_dir, handler)) = need else { return false };
     if need {
         let t = Instant::now();
@@ -311,7 +315,7 @@ fn ensure_webview() -> bool {
         }
         match made {
             Ok((c, w)) => POPUP.with(|p| {
-                if let Some(p) = p.borrow_mut().as_mut() {
+                if let Some(p) = p.try_borrow_mut().ok().as_mut().and_then(|b| b.as_mut()) {
                     if p.failed.take().is_some() {
                         crate::log!("popup ready");
                     }
@@ -323,7 +327,7 @@ fn ensure_webview() -> bool {
             Err(e) => {
                 crate::log!("popup unavailable, using the menu: {e}");
                 POPUP.with(|p| {
-                    if let Some(p) = p.borrow_mut().as_mut() {
+                    if let Some(p) = p.try_borrow_mut().ok().as_mut().and_then(|b| b.as_mut()) {
                         p.failed = Some(Instant::now());
                     }
                 });

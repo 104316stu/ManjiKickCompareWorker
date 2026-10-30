@@ -113,8 +113,16 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
     // The whole job has to land inside its lease.
     let left = (lease_left(job, lease_seconds) - 50.0).clamp(20.0, 240.0);
     let site_cookie = sh.site_cookie.lock().unwrap().clone();
+    let Some(slot) = sh.youtube_slot() else {
+        let _ = std::fs::remove_dir_all(&folder);
+        hand_back(api, job, "stopped");
+        return 0.0;
+    };
+    // The wait for a place counts against the lease too.
+    let left = left.min((lease_left(job, lease_seconds) - 50.0).max(20.0));
     let (dl, cpu) = download(&|| sh.cancelled(), tools, &job.video_id, &folder, max_video, max_bytes,
         Duration::from_secs_f64(left), site_cookie.as_deref());
+    drop(slot);
     let download_ms = t.elapsed().as_millis() as u64;
     match dl {
         Download::Ok(path) => {
@@ -167,6 +175,217 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
         }
     }
     cpu
+}
+
+/// Searches in one job, entries kept per search, and the reply's size: the
+/// site takes at most 16 KB.
+const SEARCH_MAX: usize = 6;
+const SEARCH_MAX_RESULTS: usize = 12;
+const SEARCH_BODY_MAX: usize = 15_000;
+
+enum Search {
+    Ok(Vec<Value>),
+    Refused(String),
+    /// Anything else (network, yt-dlp): the site searches itself.
+    Failed(String),
+    Cancelled,
+}
+
+/// "ytsearch10:artist title": a count of 1-20 and a query on one line.
+fn valid_search(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("ytsearch") else { return false };
+    let Some((n, query)) = rest.split_once(':') else { return false };
+    n.parse::<u32>().is_ok_and(|n| (1..=20).contains(&n))
+        && !query.trim().is_empty()
+        && query.chars().count() <= 200
+        && !query.chars().any(|c| c.is_control())
+}
+
+/// A search job: a recognition's YouTube searches, run side by side. The
+/// entries go back to the site, which ranks the videos and hands out their
+/// compares.
+pub fn run_search(sh: &Shared, api: &Api, job: &Job, tools: &Tools) -> f64 {
+    let started = Instant::now();
+    if job.searches.len() > SEARCH_MAX || !job.searches.iter().all(|s| valid_search(s)) {
+        hand_back(api, job, "searches not understood");
+        return 0.0;
+    }
+    if sh.dry_run {
+        hand_back(api, job, &format!("dry run, {} searches", job.searches.len()));
+        sh.back_off(15.0);
+        return 0.0;
+    }
+    let site_cookie = sh.site_cookie.lock().unwrap().clone();
+    let results: Vec<(Search, f64)> = std::thread::scope(|s| {
+        let runs: Vec<_> = job
+            .searches
+            .iter()
+            .enumerate()
+            .map(|(i, search)| {
+                let folder = sh.paths.tmp_dir.join(format!("search-{}-{i}-{}", job.job_id, std::process::id()));
+                let cookie = site_cookie.as_deref();
+                s.spawn(move || {
+                    let Some(_slot) = sh.youtube_slot() else { return (Search::Cancelled, 0.0) };
+                    let out = youtube_search(&|| sh.cancelled(), tools, search, &folder, cookie);
+                    let _ = std::fs::remove_dir_all(&folder);
+                    out
+                })
+            })
+            .collect();
+        runs.into_iter().map(|h| h.join().unwrap_or((Search::Failed("search thread failed".into()), 0.0))).collect()
+    });
+    let cpu = results.iter().map(|(_, c)| c).sum();
+    let mut entries = Map::new();
+    for (search, (outcome, _)) in job.searches.iter().zip(results) {
+        match outcome {
+            Search::Ok(found) => {
+                entries.insert(search.clone(), Value::Array(found));
+            }
+            Search::Refused(msg) => {
+                api.release(std::slice::from_ref(job));
+                sh.bot_check_without_cookie();
+                let wait = sh.youtube_refused();
+                crate::log!("YouTube refused this machine ({msg}); pausing {} s", wait as u64);
+                return cpu;
+            }
+            Search::Failed(msg) => {
+                hand_back(api, job, &format!("search failed ({msg})"));
+                return cpu;
+            }
+            Search::Cancelled => {
+                hand_back(api, job, "stopped");
+                return cpu;
+            }
+        }
+    }
+    sh.youtube_ok();
+    let total_ms = started.elapsed().as_millis() as u64;
+    let mut body = json!({"job_id": job.job_id, "lease": job.lease, "entries": entries,
+                          "timing": {"total_ms": total_ms}});
+    // Over the size the site takes: the last results of the longest list go first.
+    while body.to_string().len() > SEARCH_BODY_MAX {
+        let lists = body["entries"].as_object_mut().unwrap();
+        let Some(longest) = lists.values_mut().filter_map(Value::as_array_mut).max_by_key(|l| l.len()) else { break };
+        if longest.pop().is_none() {
+            break;
+        }
+    }
+    let found: usize = body["entries"].as_object().map(|m| m.values().filter_map(Value::as_array).map(Vec::len).sum()).unwrap_or(0);
+    let mut slow_tries = 0;
+    let mut tries = 0;
+    loop {
+        match api.result(&body) {
+            Ok(_) => {
+                crate::log!("job {} search: {} videos from {} searches in {:.1} s", job.job_id, found,
+                    job.searches.len(), total_ms as f64 / 1000.0);
+                return cpu;
+            }
+            Err(ApiError::Stale) => {
+                crate::log!("job {}: search came after the site stopped waiting", job.job_id);
+                return cpu;
+            }
+            Err(ApiError::Auth(c)) => {
+                sh.token_rejected(c);
+                return cpu;
+            }
+            Err(ApiError::Slow(after)) if slow_tries < 3 => {
+                let wait = after.unwrap_or(5.0).clamp(1.0, 30.0);
+                slow_tries += 1;
+                sh.back_off(wait);
+                std::thread::sleep(Duration::from_secs_f64(wait));
+            }
+            Err(e) if tries < 2 => {
+                tries += 1;
+                crate::log!("job {}: posting the search failed ({e}); retrying", job.job_id);
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Err(e) => {
+                crate::log!("job {}: search not delivered ({e})", job.job_id);
+                return cpu;
+            }
+        }
+    }
+}
+
+/// One yt-dlp search, entries only (`--flat-playlist`: no video pages).
+fn youtube_search(cancel: &dyn Fn() -> bool, tools: &Tools, search: &str, folder: &Path,
+                  site_cookie: Option<&crate::cookie::SiteCookie>) -> (Search, f64) {
+    let _ = std::fs::remove_dir_all(folder);
+    if std::fs::create_dir_all(folder).is_err() {
+        return (Search::Failed("temp folder".into()), 0.0);
+    }
+    let out = folder.join("out.json");
+    let err = folder.join("err.txt");
+    let (Ok(fo), Ok(fe)) = (std::fs::File::create(&out), std::fs::File::create(&err)) else {
+        return (Search::Failed("could not create temp files".into()), 0.0);
+    };
+    let mut cmd = Command::new(&tools.ytdlp);
+    cmd.args(["--ignore-config", "--no-cache-dir", "--flat-playlist", "--dump-single-json", "--no-warnings"])
+        .args(["--socket-timeout", "12", "--retries", "1", "--extractor-retries", "1"])
+        .env("DENO_NO_UPDATE_CHECK", "1")
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1")
+        .stdout(fo)
+        .stderr(fe);
+    if let Some(deno) = &tools.deno {
+        cmd.arg("--js-runtimes").arg(format!("deno:{}", deno.display()));
+    }
+    // Cookies as for a download (see download()): one file per run.
+    let mut _cookie_file = None;
+    if let Some(cookies) = std::env::var_os("MKW_COOKIES").filter(|p| Path::new(p).is_file()) {
+        cmd.arg("--cookies").arg(cookies);
+    } else if let Some(c) = site_cookie {
+        if let Ok(f) = crate::cookie::write_temp(c, folder) {
+            cmd.arg("--cookies").arg(f.path());
+            _cookie_file = Some(f);
+        }
+    }
+    cmd.arg("--").arg(search);
+    let (status, cpu) = crate::proc::run(&mut cmd, Instant::now() + Duration::from_secs(45), cancel);
+    drop(_cookie_file.take());
+    let read = |p: &Path| String::from_utf8_lossy(&std::fs::read(p).unwrap_or_default()).into_owned();
+    let stderr = read(&err);
+    let outcome = match status {
+        Err(crate::proc::RunError::Cancelled) => Search::Cancelled,
+        Err(crate::proc::RunError::Timeout) => Search::Failed("search took over 45 s".into()),
+        Err(crate::proc::RunError::Spawn(e)) => Search::Failed(format!("yt-dlp failed to start: {e}")),
+        Ok(_) if REFUSED.iter().any(|m| stderr.contains(m)) => Search::Refused(first_line(&stderr)),
+        Ok(_) => match serde_json::from_str::<Value>(&read(&out)) {
+            Ok(v) => Search::Ok(search_entries(&v)),
+            Err(_) => Search::Failed(first_line(&stderr)),
+        },
+    };
+    (outcome, cpu)
+}
+
+/// What the site reads from each result: id, title, channel or uploader,
+/// duration; titles cut short so a whole job fits in one reply.
+fn search_entries(v: &Value) -> Vec<Value> {
+    let cut = |s: &Value, n: usize| s.as_str().map(|s| Value::String(s.chars().take(n).collect()));
+    v["entries"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|e| e["id"].as_str().is_some_and(|id| id.len() == 11))
+        .take(SEARCH_MAX_RESULTS)
+        .map(|e| {
+            let mut m = Map::new();
+            m.insert("id".into(), e["id"].clone());
+            if let Some(t) = cut(&e["title"], 120) {
+                m.insert("title".into(), t);
+            }
+            if let Some(c) = cut(&e["channel"], 80) {
+                m.insert("channel".into(), c);
+            } else if let Some(u) = cut(&e["uploader"], 80) {
+                m.insert("uploader".into(), u);
+            }
+            if e["duration"].is_number() {
+                m.insert("duration".into(), e["duration"].clone());
+            }
+            Value::Object(m)
+        })
+        .collect()
 }
 
 /// The result's numeric fields plus pitch_searched (no nulls, no strings).
@@ -370,6 +589,26 @@ ERROR: [youtube] abc: Video unavailable https://www.youtube.com/watch?v=abc
 ";
         assert_eq!(first_line(err), "ERROR: [youtube] abc: Video unavailable <url>");
         assert_eq!(first_line(""), "yt-dlp failed");
+    }
+
+    #[test]
+    fn only_plain_searches_are_run() {
+        assert!(valid_search("ytsearch10:artist song"));
+        assert!(!valid_search("ytsearch0:x") && !valid_search("ytsearch21:x") && !valid_search("ytsearch10:"));
+        assert!(!valid_search("https://example.com/") && !valid_search("ytsearch5:a\nb"));
+    }
+
+    #[test]
+    fn search_entries_keep_what_the_site_reads() {
+        let v = json!({"entries": [
+            {"id": "abcdefghijk", "title": "Song", "channel": "Artist - Topic", "duration": 201.0, "url": "x"},
+            {"id": "short", "title": "dropped"},
+            {"id": "bcdefghijkl", "title": "t".repeat(300), "uploader": "Someone"}]});
+        let e = search_entries(&v);
+        assert_eq!(e.len(), 2);
+        assert_eq!(e[0], json!({"id": "abcdefghijk", "title": "Song", "channel": "Artist - Topic", "duration": 201.0}));
+        assert_eq!(e[1]["title"].as_str().unwrap().len(), 120);
+        assert_eq!(e[1]["uploader"], "Someone");
     }
 
     #[test]

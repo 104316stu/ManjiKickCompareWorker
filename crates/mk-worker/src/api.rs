@@ -20,18 +20,30 @@ pub struct Job {
     pub lease: String,
     #[serde(default)]
     pub audio_id: Value,
+    /// Compares only; a search job has `searches` instead.
+    #[serde(default)]
     pub video_id: String,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
     pub video_seconds: Option<f64>,
+    #[serde(default)]
     pub clip_url: String,
+    /// A search job: yt-dlp search strings ("ytsearch10:artist title").
+    #[serde(default)]
+    pub searches: Vec<String>,
     /// The server's clock; only informational (see `leased_at`).
     #[serde(default)]
     pub expires_at: f64,
     /// When the lease reply arrived, by this machine's clock.
     #[serde(skip)]
     pub leased_at: Option<std::time::Instant>,
+}
+
+impl Job {
+    pub fn is_search(&self) -> bool {
+        self.kind.as_deref() == Some("search") && !self.searches.is_empty()
+    }
 }
 
 #[derive(Debug)]
@@ -152,15 +164,20 @@ impl Api {
 
     /// Up to `want` jobs, and how long the server suggests waiting when none.
     pub fn lease(&self, want: usize) -> Result<(Vec<Job>, f64, Option<Option<String>>), ApiError> {
-        let v = self.post("/lease", &json!({"want": want.clamp(1, MAX_BATCH)}))?;
+        // "search": this worker also runs YouTube searches (job::run_search).
+        let v = self.post("/lease", &json!({"want": want.clamp(1, MAX_BATCH), "kinds": ["search"]}))?;
         let at = Instant::now();
         let mut jobs = Vec::new();
         let mut unreadable = Vec::new();
         for item in v["jobs"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
             match serde_json::from_value::<Job>(item.clone()) {
-                Ok(mut job) => {
+                Ok(mut job) if job.is_search() || !job.clip_url.is_empty() => {
                     job.leased_at = Some(at);
                     jobs.push(job);
+                }
+                Ok(job) => {
+                    crate::log!("job {} has nothing to do; handing it back", job.job_id);
+                    unreadable.push(json!({"job_id": job.job_id, "lease": job.lease}));
                 }
                 // Hand back what can't be read, if it has an id and lease at all.
                 Err(e) => {

@@ -13,6 +13,7 @@
 //!   ffmpeg = auto
 //!   deno = auto                  # also: none
 //!   auto_update = true           # install new releases by itself
+//!   youtube_at_once = 6          # yt-dlp runs at once (0 = no limit)
 
 use std::path::Path;
 
@@ -116,6 +117,9 @@ pub struct Config {
     pub ffmpeg: String,
     pub deno: String,
     pub auto_update: bool,
+    /// yt-dlp runs at once (downloads and searches); 0 = no limit. Many at
+    /// once from one address is what gets it asked to sign in.
+    pub youtube_at_once: usize,
 }
 
 impl Default for Config {
@@ -134,6 +138,7 @@ impl Default for Config {
             ffmpeg: "auto".into(),
             deno: "auto".into(),
             auto_update: true,
+            youtube_at_once: 6,
         }
     }
 }
@@ -169,6 +174,7 @@ impl Config {
                 "ffmpeg" => c.ffmpeg = v.to_string(),
                 "deno" => c.deno = v.to_string(),
                 "auto_update" => c.auto_update = truthy(v),
+                "youtube_at_once" => c.youtube_at_once = v.parse().unwrap_or(6),
                 _ => {}
             }
         }
@@ -184,9 +190,12 @@ impl Config {
              server = {}\nmode = {}\nthreads = {}\nduty = {}\nmax_video_seconds = {}\nrunning = {}\n\
              pause_fullscreen = {}\npause_battery = {}\n\
              # auto = download the pinned build; system = use the one on PATH; or a full path\n\
-             ytdlp = {}\nffmpeg = {}\ndeno = {}\nauto_update = {}\n",
+             ytdlp = {}\nffmpeg = {}\ndeno = {}\nauto_update = {}\n\
+             # yt-dlp runs at once (0 = no limit)\n\
+             youtube_at_once = {}\n",
             self.server, self.mode.key(), self.threads, self.duty, self.max_video_seconds, self.running,
-            self.pause_fullscreen, self.pause_battery, self.ytdlp, self.ffmpeg, self.deno, self.auto_update
+            self.pause_fullscreen, self.pause_battery, self.ytdlp, self.ffmpeg, self.deno, self.auto_update,
+            self.youtube_at_once
         );
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, text)?;

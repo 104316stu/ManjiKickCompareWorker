@@ -9,7 +9,7 @@ use crate::platform;
 use crate::sidecars::Tools;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 /// A job is only started with this much of its lease left.
@@ -112,6 +112,19 @@ pub struct Shared {
     pub site_cookie: Mutex<Option<Arc<crate::cookie::SiteCookie>>>,
     /// A bot check hit while holding no cookie: ask /hello again (when).
     pub cookie_recheck: Mutex<Option<f64>>,
+    /// yt-dlp runs going now (config youtube_at_once caps them).
+    youtube_running: Mutex<usize>,
+    youtube_free: Condvar,
+}
+
+/// A place among the yt-dlp runs allowed at once; freed when dropped.
+pub struct YoutubeSlot<'a>(&'a Shared);
+
+impl Drop for YoutubeSlot<'_> {
+    fn drop(&mut self) {
+        *self.0.youtube_running.lock().unwrap() -= 1;
+        self.0.youtube_free.notify_one();
+    }
 }
 
 impl Shared {
@@ -132,6 +145,8 @@ impl Shared {
             quit: AtomicBool::new(false),
             site_cookie: Mutex::new(None),
             cookie_recheck: Mutex::new(None),
+            youtube_running: Mutex::new(0),
+            youtube_free: Condvar::new(),
             st: Mutex::new(State {
                 phase: Phase::Starting,
                 policy,
@@ -337,6 +352,23 @@ impl Shared {
         let mut next = self.cookie_recheck.lock().unwrap();
         if next.is_none() {
             *next = Some(crate::now());
+        }
+    }
+
+    /// Waits for a free yt-dlp place (the other threads keep comparing
+    /// meanwhile); None when the work was cancelled while waiting.
+    pub fn youtube_slot(&self) -> Option<YoutubeSlot<'_>> {
+        let mut running = self.youtube_running.lock().unwrap();
+        loop {
+            let limit = self.cfg.lock().unwrap().youtube_at_once;
+            if limit == 0 || *running < limit {
+                *running += 1;
+                return Some(YoutubeSlot(self));
+            }
+            if self.cancelled() {
+                return None;
+            }
+            running = self.youtube_free.wait_timeout(running, Duration::from_millis(500)).unwrap().0;
         }
     }
 
@@ -789,11 +821,11 @@ impl Engine {
                         Ok((jobs, poll, cookie_version)) => {
                             sh.cookie_version_seen(a, cookie_version);
                             if jobs.is_empty() {
-                                next_lease = now + poll.max(3.0);
+                                next_lease = now + poll.max(1.0);
                             } else {
                                 crate::log!("leased {} job{}", jobs.len(), if jobs.len() == 1 { "" } else { "s" });
                                 sh.st.lock().unwrap().queue.extend(jobs);
-                                next_lease = now + 3.0;
+                                next_lease = now + 1.0;
                             }
                         }
                         Err(ApiError::Auth(c)) => {
@@ -906,6 +938,8 @@ fn worker_loop(index: usize, sh: Arc<Shared>) {
         if crate::job::lease_left(&job, lease_seconds) < MIN_LEASE_LEFT || tools.is_none() {
             a.release(std::slice::from_ref(&job));
             sh.back_off(10.0);
+        } else if job.is_search() {
+            helpers = crate::job::run_search(&sh, a, &job, tools.as_ref().unwrap());
         } else {
             helpers = crate::job::run(&sh, a, &job, tools.as_ref().unwrap(), max_video, max_bytes, lease_seconds);
         }
