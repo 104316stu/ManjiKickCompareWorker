@@ -1,6 +1,6 @@
 [package]
 name = "mk-worker"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "ManjiKick compare worker: leases audio compares from audios.manjikick.com and runs them here"
 
@@ -40,7 +40,7 @@ schannel = ">=0.1.23, <0.1.28"
 # The popup panel. 0.35 is the last line on windows 0.59, which links with
 # import libraries (later ones need raw-dylib).
 webview2-com = "0.35"
-windows = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT"] }
+windows = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 windows-core = "0.59"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

@@ -190,13 +190,9 @@ pub fn relaunch(exe: &Path) -> Result<(), String> {
     }
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        match std::process::Command::new(exe)
-            .args(&args)
-            .env("MKW_UPDATED", "1")
-            .creation_flags(windows_sys::Win32::System::Threading::DETACHED_PROCESS)
-            .spawn()
-        {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(&args).env("MKW_UPDATED", "1");
+        match crate::proc::spawn_outside(&mut cmd, windows_sys::Win32::System::Threading::DETACHED_PROCESS) {
             Ok(_) => Ok(()),
             Err(e) => {
                 roll_back(exe);

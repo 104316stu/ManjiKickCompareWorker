@@ -50,6 +50,8 @@
   .trust .who { color: var(--faint); margin-left: 8px; font-size: 11.5px; }
   .trust .hint { color: var(--faint); font-size: 11.5px; margin-top: 2px; }
   .foot { grid-column: 1 / -1; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 8px; color: var(--faint); font-size: 11.5px; padding: 6px 10px 6px 16px; }
+  .foot .chk { color: var(--accent); cursor: pointer; margin-left: 4px; white-space: nowrap; }
+  .foot .chk:hover { text-decoration: underline; }
   .foot .upd { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   .pill { align-self: flex-end; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; border: 1px solid; }
@@ -136,7 +138,7 @@
     </div>
   </section>
   <footer class="foot">
-    <span id="version">v0.0.0</span><span>·</span><span class="upd" id="update"></span>
+    <span id="version">v0.0.0</span><span>·</span><span class="upd" id="update"></span><a class="chk" id="check">Check for updates</a>
     <button class="power" id="quit" title="Quit the worker"><svg viewBox="0 0 16 16"><path d="M8 2v6M4.6 4.2a5 5 0 1 0 6.8 0"/></svg></button>
   </footer>
 </div>
@@ -157,6 +159,7 @@
   });
   document.querySelectorAll("[data-open]").forEach(l => l.onclick = () => send("open", l.dataset.open));
   $("quit").onclick = () => send("quit");
+  $("check").onclick = () => send("update");
   document.addEventListener("keydown", e => { if (e.key === "Escape") send("hide"); });
   document.addEventListener("contextmenu", e => e.preventDefault());
 

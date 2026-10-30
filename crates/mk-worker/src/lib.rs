@@ -19,6 +19,8 @@ pub mod update;
 pub mod zipx;
 
 #[cfg(windows)]
+pub mod install;
+#[cfg(windows)]
 pub mod popup;
 #[cfg(windows)]
 pub mod tray;

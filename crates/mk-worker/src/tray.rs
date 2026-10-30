@@ -34,6 +34,7 @@ const ID_LOGS: u32 = 41;
 const ID_SITE: u32 = 43;
 const ID_PANEL: u32 = 44;
 const ID_QUIT: u32 = 50;
+const ID_UNINSTALL: u32 = 51;
 
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const RUN_VALUE: &str = "ManjiKickWorker";
@@ -141,8 +142,14 @@ fn remove_icon(hwnd: HWND) {
 }
 
 // ------------------------------------------------------------------ startup key
+/// What "Start with Windows" runs: always the installed app.
 fn exe_command() -> String {
-    format!("\"{}\"", std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default())
+    let exe = if crate::install::is_installed_copy() {
+        std::env::current_exe().unwrap_or_else(|_| crate::install::installed_exe())
+    } else {
+        crate::install::installed_exe()
+    };
+    format!("\"{}\"", exe.display())
 }
 
 fn run_key(access: u32) -> Option<HKEY> {
@@ -271,6 +278,7 @@ fn show_menu(hwnd: HWND) {
         add(menu, ID_SITE, "Open the site", false, true);
         add(menu, ID_LOGS, "Open log folder", false, true);
         separator(menu);
+        add(menu, ID_UNINSTALL, "Uninstall", false, true);
         add(menu, ID_QUIT, "Quit", false, true);
 
         let mut pt = POINT { x: 0, y: 0 };
@@ -308,7 +316,7 @@ fn command(hwnd: HWND, id: u32) {
         ID_STARTUP => set_startup(startup_value().is_none()),
         ID_TOKEN => set_token_from_clipboard(hwnd),
         ID_LOGS => {
-            let _ = std::process::Command::new("explorer.exe").arg(sh.paths.log_dir()).spawn();
+            let _ = crate::proc::spawn_outside(std::process::Command::new("explorer.exe").arg(sh.paths.log_dir()), 0);
         }
         ID_SITE => open_url(&sh.cfg.lock().unwrap().server.clone()),
         ID_PANEL => {
@@ -319,6 +327,7 @@ fn command(hwnd: HWND, id: u32) {
         }
 
         ID_QUIT => unsafe { PostQuitMessage(0) },
+        ID_UNINSTALL => uninstall(hwnd),
         _ => {}
     }
     notify(hwnd, NIM_MODIFY, None);
@@ -330,10 +339,29 @@ pub fn open_url(url: &str) {
     if !(url.starts_with("https://") || url.starts_with("http://")) {
         return;
     }
-    unsafe {
-        ShellExecuteW(std::ptr::null_mut(), wide("open").as_ptr(), wide(url).as_ptr(), std::ptr::null(),
-            std::ptr::null(), SW_SHOWNORMAL);
-    }
+    // Not ShellExecute: a browser started from here must outlive the worker.
+    crate::platform::open_url(url);
+}
+
+/// Right-click > Uninstall: removes the shortcut and the Run entry, quits,
+/// and deletes the app (and, if asked, the settings and token too).
+fn uninstall(hwnd: HWND) {
+    let answer = unsafe {
+        MessageBoxW(hwnd,
+            wide("Uninstall ManjiKick Worker.\n\nAlso remove settings and token?").as_ptr(),
+            wide("Uninstall ManjiKick Worker").as_ptr(),
+            MB_YESNOCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2)
+    };
+    let everything = match answer {
+        IDYES => true,
+        IDNO => false,
+        _ => return,
+    };
+    crate::log!("uninstalling{}", if everything { " with settings and token" } else { "" });
+    set_startup(false);
+    UNINSTALL.with(|u| u.set(Some(everything)));
+    crate::popup::hide();
+    unsafe { PostQuitMessage(0) };
 }
 
 fn popup_state() -> String {
@@ -355,6 +383,10 @@ fn popup_command(cmd: &str, value: &str) {
         ("open", "logs") => ID_LOGS,
         ("open", "site") => ID_SITE,
         ("quit", _) => ID_QUIT,
+        ("update", _) => {
+            shared().st.lock().unwrap().update_check_now = true;
+            0
+        }
         _ => 0,
     };
     if id == 0 {
@@ -368,6 +400,7 @@ fn popup_command(cmd: &str, value: &str) {
 }
 
 thread_local! {
+    static UNINSTALL: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
     static TRAY_HWND: std::cell::Cell<HWND> = const { std::cell::Cell::new(std::ptr::null_mut()) };
 }
 
@@ -425,6 +458,10 @@ pub fn main() {
     let paths = Paths::get();
     paths.create_all();
     crate::logging::init(&paths.log_file, false);
+    if !crate::install::is_installed_copy() {
+        run_downloaded_copy();
+        return;
+    }
     let Some(_instance) = crate::platform::single_instance_after_update() else {
         // Already running: open its panel instead (like a second click on the icon).
         unsafe {
@@ -445,6 +482,16 @@ pub fn main() {
     let cfg = Config::load(&cfg_path);
     if !cfg_path.exists() {
         let _ = cfg.save(&cfg_path);
+    }
+    // The installed app always has its Start menu entry.
+    if !crate::install::shortcut().exists() && std::env::var_os("MKW_NO_INSTALL").is_none()
+        && std::env::var_os("MKW_HOME").is_none()
+    {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Err(e) = crate::install::create_shortcut(&exe) {
+                crate::log!("Start menu shortcut not created: {e}");
+            }
+        }
     }
     // The exe moved since "Start with Windows" was set: follow it.
     if let Some(v) = startup_value() {
@@ -509,10 +556,56 @@ pub fn main() {
         remove_icon(hwnd);
     }
     let _ = std::fs::remove_file(pid_file);
+    if let Some(everything) = UNINSTALL.with(|u| u.get()) {
+        crate::install::uninstall(everything);
+        return;
+    }
     if sh.st.lock().unwrap().restart {
         if let Ok(exe) = std::env::current_exe() {
             if let Err(e) = crate::update::relaunch(&exe) {
                 crate::log!("{e}");
+            }
+        }
+    }
+}
+
+/// A copy started from anywhere but the app folder (e.g. Downloads):
+/// install or update the app if this one is newer, then hand over to it.
+fn run_downloaded_copy() {
+    let installed = crate::install::installed_exe();
+    let mine = crate::update::current();
+    let theirs = if installed.exists() { crate::install::version_of(&installed) } else { None };
+    let newer = theirs.map_or(true, |v| mine > v);
+    let running = unsafe { FindWindowW(wide(CLASS_NAME).as_ptr(), std::ptr::null()) };
+    if !newer {
+        // Same or newer version installed: open it (its panel if it runs).
+        unsafe {
+            if !running.is_null() {
+                AllowSetForegroundWindow(u32::MAX);
+                PostMessageW(running, WM_OPEN_PANEL, 0, 0);
+                return;
+            }
+        }
+        crate::install::launch(&installed);
+        return;
+    }
+    crate::log!("installing v{}.{}.{} to {}", mine.0, mine.1, mine.2, installed.display());
+    crate::install::stop_running();
+    match crate::install::install_self() {
+        Ok(target) => {
+            // Keep "Start with Windows" on, now pointing at the installed app.
+            if startup_value().is_some() {
+                set_startup(true);
+            }
+            if !crate::install::launch(&target) {
+                crate::log!("installed, but it did not start");
+            }
+        }
+        Err(e) => {
+            crate::log!("install failed: {e}");
+            unsafe {
+                MessageBoxW(std::ptr::null_mut(), wide(&format!("ManjiKick Worker could not be installed:\n{e}")).as_ptr(),
+                    wide("ManjiKick Worker").as_ptr(), MB_OK | MB_ICONWARNING);
             }
         }
     }

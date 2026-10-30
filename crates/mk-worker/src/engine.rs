@@ -76,6 +76,8 @@ pub struct State {
     /// A checked new release waiting to be swapped in: (file, tag).
     pub update_ready: Option<(std::path::PathBuf, String)>,
     pub update_checking: bool,
+    /// "Check for updates" was clicked.
+    pub update_check_now: bool,
     /// Registering a new worker: not before this.
     pub register_after: f64,
     /// A token worked at least once this run (a later 401/403 is "rejected").
@@ -140,6 +142,7 @@ impl Shared {
                 update_text: String::new(),
                 update_ready: None,
                 update_checking: false,
+                update_check_now: false,
                 register_after: 0.0,
                 ever_connected: false,
                 restart: false,
@@ -517,9 +520,16 @@ impl Engine {
                 let auto = sh.cfg.lock().unwrap().auto_update;
                 let mut st = sh.st.lock().unwrap();
                 let blocked = sh.paths.read_token().is_none() || sh.dry_run;
-                if !auto {
+                let asked = std::mem::take(&mut st.update_check_now);
+                if asked {
+                    next_update = now;
+                    if !st.update_checking && st.update_ready.is_none() {
+                        st.update_text = "Checking for updates\u{2026}".into();
+                    }
+                }
+                if !auto && !asked && st.update_ready.is_none() && !st.update_checking {
                     st.update_text = format!("Updates off (v{})", env!("CARGO_PKG_VERSION"));
-                } else if now >= next_update && !blocked && !st.update_checking && st.update_ready.is_none()
+                } else if (auto || asked) && now >= next_update && !blocked && !st.update_checking && st.update_ready.is_none()
                     && crate::update::asset().is_some()
                 {
                     next_update = now + crate::update::CHECK_EVERY;

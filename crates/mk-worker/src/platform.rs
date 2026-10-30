@@ -96,7 +96,8 @@ mod imp {
                 return;
             }
             let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // Breakaway allowed: programs that must outlive us opt out (proc::spawn_outside).
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
             SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _,
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32);
             if AssignProcessToJobObject(job, GetCurrentProcess()) == 0 {
@@ -374,7 +375,7 @@ pub fn open_url(url: &str) {
     }
     #[cfg(windows)]
     {
-        let _ = crate::proc::quiet(std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url])).spawn();
+        let _ = crate::proc::spawn_outside(std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]), 0);
     }
     #[cfg(target_os = "linux")]
     {

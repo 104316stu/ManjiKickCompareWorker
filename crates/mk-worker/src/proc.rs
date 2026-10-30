@@ -156,3 +156,28 @@ pub fn run(cmd: &mut Command, deadline: Instant, cancel: &dyn Fn() -> bool) -> (
         std::thread::sleep(Duration::from_millis(150));
     }
 }
+
+/// Starts a program that must outlive this one (the relaunched app, the
+/// browser, a cleanup helper): outside the job object that otherwise ends
+/// everything we started when we exit. `extra` adds creation flags.
+pub fn spawn_outside(cmd: &mut Command, extra: u32) -> std::io::Result<Child> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        cmd.creation_flags(extra | CREATE_BREAKAWAY_FROM_JOB);
+        match cmd.spawn() {
+            Ok(c) => Ok(c),
+            // Inside someone else's job that forbids it: start normally.
+            Err(_) => {
+                cmd.creation_flags(extra);
+                cmd.spawn()
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = extra;
+        cmd.spawn()
+    }
+}
