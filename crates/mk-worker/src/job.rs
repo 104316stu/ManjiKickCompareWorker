@@ -327,6 +327,15 @@ pub fn run_shazam(sh: &Shared, api: &Api, job: &Job) -> f64 {
         hand_back(api, job, "dry run, Shazam request");
         return 0.0;
     }
+    // Paced: a burst gets this address shut out for minutes.
+    let wait = sh.shazam_turn() - crate::now();
+    if wait > 40.0 {
+        hand_back(api, job, "Shazam requests queued too long here");
+        return 0.0;
+    }
+    if wait > 0.0 {
+        std::thread::sleep(Duration::from_secs_f64(wait));
+    }
     let agent = crate::api::agent(Duration::from_secs(30));
     let mut call = agent.post(url).set("Content-Type", "application/json");
     for name in SHAZAM_HEADERS {

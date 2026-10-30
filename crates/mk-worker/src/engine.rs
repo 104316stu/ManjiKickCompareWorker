@@ -18,6 +18,11 @@ const MIN_LEASE_LEFT: f64 = 75.0;
 const AUTO_IDLE_SECONDS: f64 = 300.0;
 /// Max halves its threads this long after a YouTube cooldown.
 const HALF_AFTER_COOLDOWN: f64 = 1800.0;
+/// Seconds between Shazam requests: the start, and how far pacing may go
+/// either way (wider after a 429, slowly tighter while they get through).
+const SHAZAM_GAP_START: f64 = 1.5;
+const SHAZAM_GAP_MIN: f64 = 0.8;
+const SHAZAM_GAP_MAX: f64 = 10.0;
 /// Search jobs running at once, each on its own thread beside the pool.
 const SEARCHES_AT_ONCE: usize = 4;
 
@@ -73,6 +78,10 @@ pub struct State {
     /// Shazam turned this address away: no Shazam jobs before this.
     pub shazam_until: f64,
     pub shazam_streak: u32,
+    /// Shazam requests go out this far apart, at the earliest at
+    /// shazam_next: it lets an address burst ~20 and then shuts it out.
+    pub shazam_gap: f64,
+    pub shazam_next: f64,
     pub half_until: f64,
     pub today: Today,
     /// Since this machine first ran the worker.
@@ -166,6 +175,8 @@ impl Shared {
                 cooldown_streak: 0,
                 shazam_until: 0.0,
                 shazam_streak: 0,
+                shazam_gap: SHAZAM_GAP_START,
+                shazam_next: 0.0,
                 half_until: 0.0,
                 today,
                 all,
@@ -454,9 +465,19 @@ impl Shared {
         st.lease_after = st.lease_after.max(crate::now() + secs);
     }
 
-    /// Shazam answered 429: no Shazam jobs for 2 min, doubling, up to 30 min.
+    /// When this Shazam request may go out (it waits till then).
+    pub fn shazam_turn(&self) -> f64 {
+        let mut st = self.st.lock().unwrap();
+        let at = st.shazam_next.max(crate::now());
+        st.shazam_next = at + st.shazam_gap;
+        at
+    }
+
+    /// Shazam answered 429: no Shazam jobs for 2 min, doubling, up to 30
+    /// min, and the requests after it further apart.
     pub fn shazam_refused(&self) -> f64 {
         let mut st = self.st.lock().unwrap();
+        st.shazam_gap = (st.shazam_gap * 1.5).min(SHAZAM_GAP_MAX);
         st.shazam_streak += 1;
         let wait = (120.0 * 2f64.powi(st.shazam_streak as i32 - 1)).min(1800.0);
         st.shazam_until = crate::now() + wait;
@@ -464,7 +485,9 @@ impl Shared {
     }
 
     pub fn shazam_ok(&self) {
-        self.st.lock().unwrap().shazam_streak = 0;
+        let mut st = self.st.lock().unwrap();
+        st.shazam_streak = 0;
+        st.shazam_gap = (st.shazam_gap * 0.98).max(SHAZAM_GAP_MIN);
     }
 
     pub fn youtube_ok(&self) {

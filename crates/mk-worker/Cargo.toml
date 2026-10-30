@@ -1,6 +1,6 @@
 [package]
 name = "mk-worker"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2021"
 description = "ManjiKick compare worker: leases audio compares from audios.manjikick.com and runs them here"
 
