@@ -113,7 +113,7 @@ pub fn run(sh: &Shared, api: &Api, job: &Job, tools: &Tools, max_video: u32, max
     // The whole job has to land inside its lease.
     let left = (lease_left(job, lease_seconds) - 50.0).clamp(20.0, 240.0);
     let site_cookie = sh.site_cookie.lock().unwrap().clone();
-    let Some(slot) = sh.youtube_slot() else {
+    let Some(slot) = sh.youtube_slot(false) else {
         let _ = std::fs::remove_dir_all(&folder);
         hand_back(api, job, "stopped");
         return 0.0;
@@ -225,7 +225,7 @@ pub fn run_search(sh: &Shared, api: &Api, job: &Job, tools: &Tools) -> f64 {
                 let folder = sh.paths.tmp_dir.join(format!("search-{}-{i}-{}", job.job_id, std::process::id()));
                 let cookie = site_cookie.as_deref();
                 s.spawn(move || {
-                    let Some(_slot) = sh.youtube_slot() else { return (Search::Cancelled, 0.0) };
+                    let Some(_slot) = sh.youtube_slot(true) else { return (Search::Cancelled, 0.0) };
                     let out = youtube_search(&|| sh.cancelled(), tools, search, &folder, cookie);
                     let _ = std::fs::remove_dir_all(&folder);
                     out

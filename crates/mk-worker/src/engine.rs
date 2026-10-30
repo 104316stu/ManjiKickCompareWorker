@@ -18,6 +18,10 @@ const MIN_LEASE_LEFT: f64 = 75.0;
 const AUTO_IDLE_SECONDS: f64 = 300.0;
 /// Max halves its threads this long after a YouTube cooldown.
 const HALF_AFTER_COOLDOWN: f64 = 1800.0;
+/// yt-dlp places searches may use past youtube_at_once.
+const SEARCH_EXTRA: usize = 2;
+/// Search jobs running at once, each on its own thread beside the pool.
+const SEARCHES_AT_ONCE: usize = 4;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -61,6 +65,8 @@ pub struct State {
     pub policy: Policy,
     pub threads: usize,
     pub busy: usize,
+    /// Search jobs running (outside the pool: a site thread waits on each).
+    pub searching: usize,
     /// Threads sitting out their --duty rest (no job, but no new lease for them).
     pub resting: usize,
     pub queue: Vec<Job>,
@@ -115,6 +121,8 @@ pub struct Shared {
     /// yt-dlp runs going now (config youtube_at_once caps them).
     youtube_running: Mutex<usize>,
     youtube_free: Condvar,
+    /// Searches waiting for a place: downloads let them go first.
+    searches_waiting: Mutex<usize>,
 }
 
 /// A place among the yt-dlp runs allowed at once; freed when dropped.
@@ -123,7 +131,7 @@ pub struct YoutubeSlot<'a>(&'a Shared);
 impl Drop for YoutubeSlot<'_> {
     fn drop(&mut self) {
         *self.0.youtube_running.lock().unwrap() -= 1;
-        self.0.youtube_free.notify_one();
+        self.0.youtube_free.notify_all();
     }
 }
 
@@ -147,11 +155,13 @@ impl Shared {
             cookie_recheck: Mutex::new(None),
             youtube_running: Mutex::new(0),
             youtube_free: Condvar::new(),
+            searches_waiting: Mutex::new(0),
             st: Mutex::new(State {
                 phase: Phase::Starting,
                 policy,
                 threads: policy.threads,
                 busy: 0,
+                searching: 0,
                 resting: 0,
                 queue: Vec::new(),
                 cooldown_until: 0.0,
@@ -356,20 +366,38 @@ impl Shared {
     }
 
     /// Waits for a free yt-dlp place (the other threads keep comparing
-    /// meanwhile); None when the work was cancelled while waiting.
-    pub fn youtube_slot(&self) -> Option<YoutubeSlot<'_>> {
+    /// meanwhile); None when the work was cancelled while waiting. A search
+    /// (`search`) has a site thread waiting on it: it goes ahead of any
+    /// download and may use SEARCH_EXTRA places past the limit, a search
+    /// being one short page rather than a whole video.
+    pub fn youtube_slot(&self, search: bool) -> Option<YoutubeSlot<'_>> {
         let mut running = self.youtube_running.lock().unwrap();
-        loop {
+        if search {
+            *self.searches_waiting.lock().unwrap() += 1;
+        }
+        let slot = loop {
             let limit = self.cfg.lock().unwrap().youtube_at_once;
-            if limit == 0 || *running < limit {
+            let searches_waiting = *self.searches_waiting.lock().unwrap();
+            let free = if search {
+                limit == 0 || *running < limit + SEARCH_EXTRA
+            } else {
+                limit == 0 || (*running < limit && searches_waiting == 0)
+            };
+            if free {
                 *running += 1;
-                return Some(YoutubeSlot(self));
+                break Some(YoutubeSlot(self));
             }
             if self.cancelled() {
-                return None;
+                break None;
             }
             running = self.youtube_free.wait_timeout(running, Duration::from_millis(500)).unwrap().0;
+        };
+        if search {
+            *self.searches_waiting.lock().unwrap() -= 1;
+            // Downloads held back for this search may go now.
+            self.youtube_free.notify_all();
         }
+        slot
     }
 
     pub fn add_download(&self, bytes: u64) {
@@ -807,7 +835,12 @@ impl Engine {
                     let st = sh.st.lock().unwrap();
                     // Live jobs (any worker past shadow) wait on the site: no prefetch.
                     let prefetch = if st.trust.as_deref() == Some("shadow") { policy.prefetch } else { 0 };
-                    let want = (threads + prefetch).saturating_sub(st.busy + st.resting + st.queue.len());
+                    let mut want = (threads + prefetch).saturating_sub(st.busy + st.resting + st.queue.len());
+                    // Every thread busy: still ask for one, so a search (leased
+                    // first, and run beside the pool) isn't left to the site.
+                    if want == 0 && st.queue.is_empty() && st.searching < SEARCHES_AT_ONCE {
+                        want = 1;
+                    }
                     (st.phase.clone(), want.min(MAX_BATCH), st.lease_after)
                 };
                 if phase != Phase::Running {
@@ -824,7 +857,11 @@ impl Engine {
                                 next_lease = now + poll.max(1.0);
                             } else {
                                 crate::log!("leased {} job{}", jobs.len(), if jobs.len() == 1 { "" } else { "s" });
-                                sh.st.lock().unwrap().queue.extend(jobs);
+                                let (searches, compares): (Vec<Job>, Vec<Job>) = jobs.into_iter().partition(Job::is_search);
+                                sh.st.lock().unwrap().queue.extend(compares);
+                                for job in searches {
+                                    start_search(sh, job);
+                                }
                                 next_lease = now + 1.0;
                             }
                         }
@@ -898,6 +935,27 @@ fn check_for_update(sh: &Shared) {
             st.update_text = format!("Update check failed (v{})", env!("CARGO_PKG_VERSION"));
         }
     }
+}
+
+/// A search job on a thread of its own, at once: the pool may be busy
+/// with compares for minutes.
+fn start_search(sh: &Arc<Shared>, job: Job) {
+    let s = sh.clone();
+    s.st.lock().unwrap().searching += 1;
+    std::thread::spawn(move || {
+        let token = s.paths.read_token().unwrap_or_default();
+        let server = s.cfg.lock().unwrap().server.clone();
+        let a = Api::new(&server, &token);
+        let tools = s.st.lock().unwrap().tools.clone();
+        match tools {
+            Some(t) => {
+                crate::job::run_search(&s, &a, &job, &t);
+            }
+            None => a.release(std::slice::from_ref(&job)),
+        }
+        let mut st = s.st.lock().unwrap();
+        st.searching = st.searching.saturating_sub(1);
+    });
 }
 
 fn wait(sh: &Shared, secs: f64) {
