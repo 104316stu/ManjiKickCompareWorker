@@ -619,8 +619,10 @@ fn run_downloaded_copy() {
     crate::install::stop_running();
     match crate::install::install_self() {
         Ok(target) => {
-            // Keep "Start with Windows" on, now pointing at the installed app.
-            if startup_value().is_some() {
+            // "Start with Windows" on for a first install (else a restart
+            // left the machine idle until someone opened the app), and kept
+            // on, now pointing at the installed app, for an update.
+            if theirs.is_none() || startup_value().is_some() {
                 set_startup(true);
             }
             if !crate::install::launch(&target) {
