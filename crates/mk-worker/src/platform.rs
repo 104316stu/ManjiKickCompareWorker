@@ -228,6 +228,8 @@ mod imp {
 
     pub fn background_thread() {}
 
+    pub fn helper_starting() {}
+
     pub fn too_hot() -> bool {
         false
     }
@@ -238,7 +240,10 @@ mod imp {
 mod imp {
     use super::*;
 
+    /// macOS: nothing. Nice can't be undone without root and every helper
+    /// inherits it; background_thread() does the job there.
     pub fn set_priority(_idle: bool) {
+        #[cfg(not(target_os = "macos"))]
         unsafe {
             libc::setpriority(libc::PRIO_PROCESS, 0, 19);
         }
@@ -250,6 +255,15 @@ mod imp {
         #[cfg(target_os = "macos")]
         unsafe {
             libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
+        }
+    }
+
+    /// Around starting a helper: it shouldn't inherit the utility class. A
+    /// download is mostly waiting, and slow helpers hold the whole job up.
+    pub fn helper_starting() {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_DEFAULT, 0);
         }
     }
 

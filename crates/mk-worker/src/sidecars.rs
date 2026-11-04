@@ -27,6 +27,9 @@ struct Pin {
     sha256: &'static str,
     /// The archive member to take (prefix match), or None for a plain binary.
     member: Option<&'static str>,
+    /// Unpack the whole archive into a folder named `file`; `member` is the
+    /// program in it.
+    tree: bool,
 }
 
 const YTDLP_VERSION: &str = "2026.08.19";
@@ -40,6 +43,7 @@ mod pins {
             url: "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp.exe",
             sha256: "66674953fe251b89f4d08c5f0e35e0728679bd67ab3d7d05c0562af101dd3e7a",
             member: None,
+            tree: false,
         })
     }
     pub fn ffmpeg() -> Option<Pin> {
@@ -48,6 +52,7 @@ mod pins {
             url: "https://files.pythonhosted.org/packages/2c/c6/fa760e12a2483469e2bf5058c5faff664acf66cadb4df2ad6205b016a73d/imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl",
             sha256: "02fa47c83703c37df6bfe4896aab339013f62bf02c5ebf2dce6da56af04ffc0a",
             member: Some("imageio_ffmpeg/binaries/ffmpeg-"),
+            tree: false,
         })
     }
     pub fn deno() -> Option<Pin> {
@@ -56,6 +61,7 @@ mod pins {
             url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-pc-windows-msvc.zip",
             sha256: "171efab55ac6b9881fd53ee4c20f8bf3bb1340ffc618483746909014db12216a",
             member: Some("deno.exe"),
+            tree: false,
         })
     }
 }
@@ -73,6 +79,7 @@ mod pins {
                 url: "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_musllinux",
                 sha256: "f3dec9cfeaf304cec98290fe41c6ad465d4b747d302473559643e7af24929722",
                 member: None,
+                tree: false,
             }
         } else {
             Pin {
@@ -80,6 +87,7 @@ mod pins {
                 url: "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux",
                 sha256: "58162f9bfdc27458ea47bfcb311cf47028f17d8154a8bf7d689861d46399230a",
                 member: None,
+                tree: false,
             }
         })
     }
@@ -90,6 +98,7 @@ mod pins {
             url: "https://files.pythonhosted.org/packages/a0/2d/43c8522a2038e9d0e7dbdf3a61195ecc31ca576fb1527a528c877e87d973/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_x86_64.whl",
             sha256: "c7e46fcec401dd990405049d2e2f475e2b397779df2519b544b8aab515195282",
             member: Some("imageio_ffmpeg/binaries/ffmpeg-"),
+            tree: false,
         })
     }
     pub fn deno() -> Option<Pin> {
@@ -101,6 +110,7 @@ mod pins {
             url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-unknown-linux-gnu.zip",
             sha256: "8b010a3b1a4a0188a67cdb8a7a27348b2a501af78aec7fc74f2ace167368d530",
             member: Some("deno"),
+            tree: false,
         })
     }
 }
@@ -114,6 +124,7 @@ mod pins {
             url: "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_linux_aarch64",
             sha256: "b16e4dab368a816cd05d477d698a605a6ae87ccee1c8ffd38fa21d7254141fcc",
             member: None,
+            tree: false,
         })
     }
     pub fn ffmpeg() -> Option<Pin> {
@@ -122,6 +133,7 @@ mod pins {
             url: "https://files.pythonhosted.org/packages/33/e7/1925bfbc563c39c1d2e82501d8372734a5c725e53ac3b31b4c2d081e895b/imageio_ffmpeg-0.6.0-py3-none-manylinux2014_aarch64.whl",
             sha256: "1d47bebd83d2c5fc770720d211855f208af8a596c82d17730aa51e815cdee6dc",
             member: Some("imageio_ffmpeg/binaries/ffmpeg-"),
+            tree: false,
         })
     }
     pub fn deno() -> Option<Pin> {
@@ -130,6 +142,7 @@ mod pins {
             url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-unknown-linux-gnu.zip",
             sha256: "6b7cae3a8fc4385a59dea3146fcb8bad7fea4230e0ad36a8c692afacbc254be0",
             member: Some("deno"),
+            tree: false,
         })
     }
 }
@@ -138,12 +151,16 @@ mod pins {
 mod pins {
     use super::Pin;
     pub fn ytdlp() -> Option<Pin> {
-        // One build for both kinds of Mac.
+        // One build for both kinds of Mac. The folder build, not the single
+        // file: that one unpacks ~100 libraries to a new temp folder on every
+        // run, and macOS checks each new library before loading it. Downloads
+        // took ~50 s on a real Mac against ~5 s on Windows (4 Nov 2026).
         Some(Pin {
-            file: "yt-dlp-2026.08.19",
-            url: "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos",
-            sha256: "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202",
-            member: None,
+            file: "yt-dlp-2026.08.19-dir",
+            url: "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos.zip",
+            sha256: "07e54b0865303c864006925913bce2604f8ee8cc6f18699bac9c309f9328a6d8",
+            member: Some("yt-dlp_macos"),
+            tree: true,
         })
     }
     #[cfg(target_arch = "aarch64")]
@@ -153,6 +170,7 @@ mod pins {
             url: "https://files.pythonhosted.org/packages/40/5c/f3d8a657d362cc93b81aab8feda487317da5b5d31c0e1fdfd5e986e55d17/imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl",
             sha256: "b1ae3173414b5fc5f538a726c4e48ea97edc0d2cdc11f103afee655c463fa742",
             member: Some("imageio_ffmpeg/binaries/ffmpeg-"),
+            tree: false,
         })
     }
     #[cfg(target_arch = "x86_64")]
@@ -162,6 +180,7 @@ mod pins {
             url: "https://files.pythonhosted.org/packages/da/58/87ef68ac83f4c7690961bce288fd8e382bc5f1513860fc7f90a9c1c1c6bf/imageio_ffmpeg-0.6.0-py3-none-macosx_10_9_intel.macosx_10_9_x86_64.whl",
             sha256: "9d2baaf867088508d4a3458e61eeb30e945c4ad8016025545f66c4b5aaef0a61",
             member: Some("imageio_ffmpeg/binaries/ffmpeg-"),
+            tree: false,
         })
     }
     #[cfg(target_arch = "aarch64")]
@@ -171,6 +190,7 @@ mod pins {
             url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-apple-darwin.zip",
             sha256: "b796aadd131f6930560c1ee040cf0d6f53933fbb987464e9ff46bd7ea4830615",
             member: Some("deno"),
+            tree: false,
         })
     }
     #[cfg(target_arch = "x86_64")]
@@ -180,6 +200,7 @@ mod pins {
             url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-apple-darwin.zip",
             sha256: "c1b8b89a81e91b2a8b3f96def3195d08cfe3a105651da7908d53061f7140510d",
             member: Some("deno"),
+            tree: false,
         })
     }
 }
@@ -263,17 +284,22 @@ pub fn ensure(cfg: &Config, paths: &Paths, progress: &dyn Fn(String)) -> Result<
 /// Old pinned versions left in the bin folder after an upgrade.
 fn cleanup_old(paths: &Paths, keep: &[PathBuf]) {
     let Ok(dir) = std::fs::read_dir(&paths.bin_dir) else { return };
+    // The top entry in the bin folder: the program, or the folder it is in.
     let kept: Vec<String> = keep
         .iter()
-        .filter(|k| k.parent() == Some(paths.bin_dir.as_path()))
-        .filter_map(|k| k.file_name()?.to_str().map(String::from))
+        .filter_map(|k| k.strip_prefix(&paths.bin_dir).ok()?.components().next())
+        .filter_map(|c| c.as_os_str().to_str().map(String::from))
         .collect();
     for e in dir.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         let ours = ["yt-dlp-", "ffmpeg-", "deno-"].iter().any(|p| name.starts_with(p));
         let current = kept.iter().any(|k| name == *k || name == format!("{k}.sha256"));
         if ours && !current {
-            let _ = std::fs::remove_file(e.path());
+            if e.path().is_dir() {
+                let _ = std::fs::remove_dir_all(e.path());
+            } else {
+                let _ = std::fs::remove_file(e.path());
+            }
         }
     }
 }
@@ -285,7 +311,10 @@ fn marker(target: &Path) -> PathBuf {
 }
 
 fn install(pin: &Pin, base: &str, paths: &Paths, progress: &dyn Fn(String)) -> Result<PathBuf, String> {
-    let target = paths.bin_dir.join(pin.file);
+    let target = match (pin.tree, pin.member) {
+        (true, Some(program)) => paths.bin_dir.join(pin.file).join(program),
+        _ => paths.bin_dir.join(pin.file),
+    };
     if target.is_file()
         && std::fs::read_to_string(marker(&target)).map(|m| m.trim() == pin.sha256).unwrap_or(false)
     {
@@ -300,6 +329,23 @@ fn install(pin: &Pin, base: &str, paths: &Paths, progress: &dyn Fn(String)) -> R
         return Err(format!("{base}: checksum mismatch (got {digest}), refusing to use it"));
     }
     let tmp = paths.bin_dir.join(format!("{}.tmp", pin.file));
+    if pin.tree {
+        progress(format!("unpacking {base}"));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let bytes = std::fs::read(&part).map_err(|e| e.to_string())?;
+        crate::zipx::extract_all(&bytes, &tmp)?;
+        drop(bytes);
+        let _ = std::fs::remove_file(&part);
+        let folder = paths.bin_dir.join(pin.file);
+        let _ = std::fs::remove_dir_all(&folder);
+        std::fs::rename(&tmp, &folder).map_err(|e| e.to_string())?;
+        if !target.is_file() {
+            return Err(format!("{base}: the archive has no {}", target.display()));
+        }
+        std::fs::write(marker(&target), pin.sha256).map_err(|e| e.to_string())?;
+        crate::log!("{base} ready: {}", target.display());
+        return Ok(target);
+    }
     match pin.member {
         None => std::fs::rename(&part, &tmp).map_err(|e| e.to_string())?,
         Some(member) => {

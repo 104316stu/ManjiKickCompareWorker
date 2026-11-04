@@ -124,7 +124,10 @@ pub fn run(cmd: &mut Command, deadline: Instant, cancel: &dyn Fn() -> bool) -> (
 #[cfg(unix)]
 pub fn run(cmd: &mut Command, deadline: Instant, cancel: &dyn Fn() -> bool) -> (Result<ExitStatus, RunError>, f64) {
     use std::os::unix::process::ExitStatusExt;
-    let mut child = match quiet(cmd).spawn() {
+    crate::platform::helper_starting();
+    let spawned = quiet(cmd).spawn();
+    crate::platform::background_thread();
+    let mut child = match spawned {
         Ok(c) => c,
         Err(e) => return (Err(RunError::Spawn(e.to_string())), 0.0),
     };

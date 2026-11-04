@@ -653,16 +653,9 @@ pub fn main() {
         ns_string!("Comparing audio"),
     );
     std::mem::forget(activity);
-    // The process runs at low priority; the menu and panel stay quick.
-    unsafe {
-        libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0);
-    }
     let engine = {
         let sh = sh.clone();
-        std::thread::spawn(move || {
-            crate::platform::set_priority(true);
-            Engine::new(sh).run(None)
-        })
+        std::thread::spawn(move || Engine::new(sh).run(None))
     };
 
     let app = NSApplication::sharedApplication(mtm);

@@ -1,4 +1,4 @@
-//! Just enough zip to pull one file out of a release archive (stored or
+//! Just enough zip to pull files out of a release archive (stored or
 //! deflated, no zip64). The archive's sha256 is checked before this runs.
 
 fn u16_at(b: &[u8], i: usize) -> Option<usize> {
@@ -10,6 +10,49 @@ fn u32_at(b: &[u8], i: usize) -> Option<usize> {
 
 /// The first entry whose name `pick` accepts, decompressed.
 pub fn extract(zip: &[u8], pick: impl Fn(&str) -> bool) -> Result<(String, Vec<u8>), String> {
+    let mut found = None;
+    walk(zip, |name, _, data| {
+        if !pick(name) {
+            return Ok(false);
+        }
+        found = Some((name.to_string(), data()?));
+        Ok(true)
+    })?;
+    found.ok_or_else(|| "file not found in the archive".to_string())
+}
+
+/// Every entry, into the folder `dest`, with the executable bit kept.
+pub fn extract_all(zip: &[u8], dest: &std::path::Path) -> Result<(), String> {
+    walk(zip, |name, mode, data| {
+        let relative = std::path::Path::new(name);
+        if !relative.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+            return Err(format!("unsafe path in the archive: {name}"));
+        }
+        let path = dest.join(relative);
+        if name.ends_with('/') {
+            std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
+            return Ok(false);
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        std::fs::write(&path, data()?).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let bits = if mode & 0o111 != 0 { 0o755 } else { 0o644 };
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(bits));
+        }
+        #[cfg(not(unix))]
+        let _ = mode;
+        Ok(false)
+    })
+}
+
+/// Calls `visit` with each entry's name, unix mode and a way to decompress
+/// it, until it returns true.
+fn walk(zip: &[u8], mut visit: impl FnMut(&str, u32, &dyn Fn() -> Result<Vec<u8>, String>) -> Result<bool, String>)
+    -> Result<(), String> {
     let bad = || "not a zip file (or a damaged one)".to_string();
     let floor = zip.len().saturating_sub(22 + 65535);
     let eocd = (floor..zip.len().saturating_sub(21))
@@ -28,29 +71,32 @@ pub fn extract(zip: &[u8], pick: impl Fn(&str) -> bool) -> Result<(String, Vec<u
         let nlen = u16_at(zip, p + 28).ok_or_else(bad)?;
         let elen = u16_at(zip, p + 30).ok_or_else(bad)?;
         let clen = u16_at(zip, p + 32).ok_or_else(bad)?;
+        let mode = (u32_at(zip, p + 38).ok_or_else(bad)? >> 16) as u32;
         let local = u32_at(zip, p + 42).ok_or_else(bad)?;
         let name = String::from_utf8_lossy(zip.get(p + 46..p + 46 + nlen).ok_or_else(bad)?).to_string();
         p += 46 + nlen + elen + clen;
-        if !pick(&name) {
-            continue;
-        }
-        if zip.get(local..local + 4) != Some(&[0x50, 0x4b, 0x03, 0x04][..]) {
-            return Err(bad());
-        }
-        let start = local + 30 + u16_at(zip, local + 26).ok_or_else(bad)? + u16_at(zip, local + 28).ok_or_else(bad)?;
-        let data = zip.get(start..start + csize).ok_or_else(bad)?;
-        let out = match method {
-            0 => data.to_vec(),
-            8 => miniz_oxide::inflate::decompress_to_vec_with_limit(data, usize_ + 1)
-                .map_err(|e| format!("inflate {name}: {e:?}"))?,
-            m => return Err(format!("{name}: unsupported zip method {m}")),
+        let read = || -> Result<Vec<u8>, String> {
+            if zip.get(local..local + 4) != Some(&[0x50, 0x4b, 0x03, 0x04][..]) {
+                return Err(bad());
+            }
+            let start = local + 30 + u16_at(zip, local + 26).ok_or_else(bad)? + u16_at(zip, local + 28).ok_or_else(bad)?;
+            let data = zip.get(start..start + csize).ok_or_else(bad)?;
+            let out = match method {
+                0 => data.to_vec(),
+                8 => miniz_oxide::inflate::decompress_to_vec_with_limit(data, usize_ + 1)
+                    .map_err(|e| format!("inflate {name}: {e:?}"))?,
+                m => return Err(format!("{name}: unsupported zip method {m}")),
+            };
+            if out.len() != usize_ {
+                return Err(format!("{name}: size mismatch"));
+            }
+            Ok(out)
         };
-        if out.len() != usize_ {
-            return Err(format!("{name}: size mismatch"));
+        if visit(&name, mode, &read)? {
+            return Ok(());
         }
-        return Ok((name, out));
     }
-    Err("file not found in the archive".into())
+    Ok(())
 }
 
 #[cfg(test)]
@@ -58,5 +104,46 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(super::extract(b"not a zip at all, just bytes", |_| true).is_err());
+    }
+
+    /// A stored one-entry zip holding `name`.
+    fn zip_of(name: &str, data: &[u8]) -> Vec<u8> {
+        let mut z = vec![0x50, 0x4b, 3, 4];
+        z.extend([0u8; 14]);
+        z.extend((data.len() as u32).to_le_bytes());
+        z.extend((data.len() as u32).to_le_bytes());
+        z.extend((name.len() as u16).to_le_bytes());
+        z.extend([0u8; 2]);
+        z.extend(name.as_bytes());
+        z.extend(data);
+        let central = z.len() as u32;
+        z.extend([0x50, 0x4b, 1, 2]);
+        z.extend([0u8; 16]);
+        z.extend((data.len() as u32).to_le_bytes());
+        z.extend((data.len() as u32).to_le_bytes());
+        z.extend((name.len() as u16).to_le_bytes());
+        z.extend([0u8; 8]);
+        z.extend((0o100755u32 << 16).to_le_bytes());
+        z.extend(0u32.to_le_bytes());
+        z.extend(name.as_bytes());
+        let size = z.len() as u32 - central;
+        z.extend([0x50, 0x4b, 5, 6]);
+        z.extend([0u8; 4]);
+        z.extend(1u16.to_le_bytes());
+        z.extend(1u16.to_le_bytes());
+        z.extend(size.to_le_bytes());
+        z.extend(central.to_le_bytes());
+        z.extend([0u8; 2]);
+        z
+    }
+
+    #[test]
+    fn unpacks_a_tree_and_refuses_to_leave_it() {
+        let dest = std::env::temp_dir().join(format!("mkzip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dest);
+        super::extract_all(&zip_of("a/b.txt", b"hi"), &dest).unwrap();
+        assert_eq!(std::fs::read(dest.join("a/b.txt")).unwrap(), b"hi");
+        assert!(super::extract_all(&zip_of("../x.txt", b"hi"), &dest).is_err());
+        let _ = std::fs::remove_dir_all(&dest);
     }
 }
