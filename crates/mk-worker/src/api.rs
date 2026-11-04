@@ -174,9 +174,16 @@ impl Api {
 
     /// Up to `want` jobs, and how long the server suggests waiting when none.
     /// `shazam`: also take Shazam requests (not while Shazam turns us away).
-    pub fn lease(&self, want: usize, shazam: bool) -> Result<(Vec<Job>, f64, Option<Option<String>>), ApiError> {
+    /// `side_only`: every thread is busy, so no compares this time.
+    pub fn lease(&self, want: usize, shazam: bool, side_only: bool) -> Result<(Vec<Job>, f64, Option<Option<String>>), ApiError> {
         // "search": YouTube searches (job::run_search); "shazam": job::run_shazam.
-        let kinds: &[&str] = if shazam { &["search", "shazam"] } else { &["search"] };
+        let mut kinds = vec!["search"];
+        if shazam {
+            kinds.push("shazam");
+        }
+        if side_only {
+            kinds.push("no_live");
+        }
         let v = self.post("/lease", &json!({"want": want.clamp(1, MAX_BATCH), "kinds": kinds}))?;
         let at = Instant::now();
         let mut jobs = Vec::new();

@@ -24,7 +24,7 @@ const SHAZAM_GAP_START: f64 = 1.5;
 const SHAZAM_GAP_MIN: f64 = 0.8;
 const SHAZAM_GAP_MAX: f64 = 10.0;
 /// Search jobs running at once, each on its own thread beside the pool.
-const SEARCHES_AT_ONCE: usize = 4;
+const SEARCHES_AT_ONCE: usize = 8;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Phase {
@@ -858,17 +858,20 @@ impl Engine {
 
             // Lease or hand back.
             if let Some(a) = &api {
-                let (phase, want, lease_after) = {
+                let (phase, want, lease_after, side_only) = {
                     let st = sh.st.lock().unwrap();
                     // Live jobs (any worker past shadow) wait on the site: no prefetch.
                     let prefetch = if st.trust.as_deref() == Some("shadow") { policy.prefetch } else { 0 };
                     let mut want = (threads + prefetch).saturating_sub(st.busy + st.resting + st.queue.len());
-                    // Every thread busy: still ask for one, so a search (leased
-                    // first, and run beside the pool) isn't left to the site.
-                    if want == 0 && st.queue.is_empty() && st.searching < SEARCHES_AT_ONCE {
+                    // Every thread busy: still ask for one search or Shazam
+                    // request (run beside the pool, they take no real CPU), or
+                    // they are left to the site while a compare runs. Light
+                    // mode's one thread starved them.
+                    let side_only = want == 0 && st.searching < SEARCHES_AT_ONCE;
+                    if side_only {
                         want = 1;
                     }
-                    (st.phase.clone(), want.min(MAX_BATCH), st.lease_after)
+                    (st.phase.clone(), want.min(MAX_BATCH), st.lease_after, side_only)
                 };
                 if phase != Phase::Running {
                     let back: Vec<Job> = std::mem::take(&mut sh.st.lock().unwrap().queue);
@@ -878,7 +881,7 @@ impl Engine {
                     }
                 } else if want > 0 && now >= next_lease && now >= lease_after {
                     let shazam = now >= sh.st.lock().unwrap().shazam_until;
-                    match a.lease(want, shazam) {
+                    match a.lease(want, shazam, side_only) {
                         Ok((jobs, poll, cookie_version)) => {
                             sh.cookie_version_seen(a, cookie_version);
                             if jobs.is_empty() {
