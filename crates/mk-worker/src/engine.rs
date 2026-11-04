@@ -473,13 +473,14 @@ impl Shared {
         at
     }
 
-    /// Shazam answered 429: no Shazam jobs for 2 min, doubling, up to 30
-    /// min, and the requests after it further apart.
+    /// Shazam answered 429: no Shazam jobs for 1 min, doubling, up to 5 min
+    /// (its blocks are short: the site's address gets back in after one
+    /// minute), and the requests after it further apart.
     pub fn shazam_refused(&self) -> f64 {
         let mut st = self.st.lock().unwrap();
         st.shazam_gap = (st.shazam_gap * 1.5).min(SHAZAM_GAP_MAX);
         st.shazam_streak += 1;
-        let wait = (120.0 * 2f64.powi(st.shazam_streak as i32 - 1)).min(1800.0);
+        let wait = (60.0 * 2f64.powi(st.shazam_streak as i32 - 1)).min(300.0);
         st.shazam_until = crate::now() + wait;
         wait
     }
