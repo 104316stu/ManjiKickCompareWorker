@@ -134,9 +134,60 @@ mod pins {
     }
 }
 
+#[cfg(target_os = "macos")]
+mod pins {
+    use super::Pin;
+    pub fn ytdlp() -> Option<Pin> {
+        // One build for both kinds of Mac.
+        Some(Pin {
+            file: "yt-dlp-2026.08.19",
+            url: "https://github.com/yt-dlp/yt-dlp/releases/download/2026.08.19/yt-dlp_macos",
+            sha256: "0f192b7ec147ab6288885d6351d9ab67367640029b4377576ef46dd79cf7b202",
+            member: None,
+        })
+    }
+    #[cfg(target_arch = "aarch64")]
+    pub fn ffmpeg() -> Option<Pin> {
+        Some(Pin {
+            file: "ffmpeg-imageio-0.6.0",
+            url: "https://files.pythonhosted.org/packages/40/5c/f3d8a657d362cc93b81aab8feda487317da5b5d31c0e1fdfd5e986e55d17/imageio_ffmpeg-0.6.0-py3-none-macosx_11_0_arm64.whl",
+            sha256: "b1ae3173414b5fc5f538a726c4e48ea97edc0d2cdc11f103afee655c463fa742",
+            member: Some("imageio_ffmpeg/binaries/ffmpeg-"),
+        })
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn ffmpeg() -> Option<Pin> {
+        Some(Pin {
+            file: "ffmpeg-imageio-0.6.0",
+            url: "https://files.pythonhosted.org/packages/da/58/87ef68ac83f4c7690961bce288fd8e382bc5f1513860fc7f90a9c1c1c6bf/imageio_ffmpeg-0.6.0-py3-none-macosx_10_9_intel.macosx_10_9_x86_64.whl",
+            sha256: "9d2baaf867088508d4a3458e61eeb30e945c4ad8016025545f66c4b5aaef0a61",
+            member: Some("imageio_ffmpeg/binaries/ffmpeg-"),
+        })
+    }
+    #[cfg(target_arch = "aarch64")]
+    pub fn deno() -> Option<Pin> {
+        Some(Pin {
+            file: "deno-2.9.5",
+            url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-aarch64-apple-darwin.zip",
+            sha256: "b796aadd131f6930560c1ee040cf0d6f53933fbb987464e9ff46bd7ea4830615",
+            member: Some("deno"),
+        })
+    }
+    #[cfg(target_arch = "x86_64")]
+    pub fn deno() -> Option<Pin> {
+        Some(Pin {
+            file: "deno-2.9.5",
+            url: "https://github.com/denoland/deno/releases/download/v2.9.5/deno-x86_64-apple-darwin.zip",
+            sha256: "c1b8b89a81e91b2a8b3f96def3195d08cfe3a105651da7908d53061f7140510d",
+            member: Some("deno"),
+        })
+    }
+}
+
 #[cfg(not(any(
     all(windows, target_arch = "x86_64"),
-    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64"))
+    all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")),
+    target_os = "macos"
 )))]
 mod pins {
     use super::Pin;
@@ -266,6 +317,17 @@ fn install(pin: &Pin, base: &str, paths: &Paths, progress: &dyn Fn(String)) -> R
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+    }
+    // Apple silicon only runs signed code: an unsigned helper gets a local
+    // signature. No admin and no Apple account needed.
+    #[cfg(target_os = "macos")]
+    {
+        let signed = std::process::Command::new("/usr/bin/codesign").arg("-v").arg(&tmp)
+            .stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        if !signed {
+            let _ = std::process::Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(&tmp)
+                .stderr(std::process::Stdio::null()).status();
+        }
     }
     let _ = std::fs::remove_file(&target);
     std::fs::rename(&tmp, &target).map_err(|e| e.to_string())?;

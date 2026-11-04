@@ -552,7 +552,10 @@ impl Engine {
         let mut handles = Vec::new();
         for i in 0..pool {
             let s = sh.clone();
-            handles.push(std::thread::spawn(move || worker_loop(i, s)));
+            handles.push(std::thread::spawn(move || {
+                platform::background_thread();
+                worker_loop(i, s)
+            }));
         }
 
         let mut api: Option<Api> = None;
@@ -563,6 +566,7 @@ impl Engine {
         let mut next_line = crate::now() + status_every.map(|d| d.as_secs_f64()).unwrap_or(60.0);
         let mut load = Load { last: None, others: 0.0 };
         let mut sensed = (false, false, false, false); // fullscreen, battery, free, busy
+        let mut too_hot = false;
         let mut priority_idle: Option<bool> = None;
         let mut last_phase = Phase::Starting;
         let mut pending_cookie: Option<Option<String>> = None;
@@ -793,6 +797,7 @@ impl Engine {
                 // Hysteresis on "busy": on above 60 %, off below 35 %.
                 let busy = if sensed.3 { others > 0.35 } else { others > 0.60 };
                 sensed = (platform::fullscreen(), platform::on_battery(), free, busy);
+                too_hot = platform::too_hot();
             }
             let cfg = sh.cfg.lock().unwrap().clone();
             let mut policy = config::policy(cfg.mode, cores, sensed.2);
@@ -815,12 +820,14 @@ impl Engine {
             }
 
             // Phase.
-            let pause = if cfg.pause_fullscreen && sensed.0 {
+            let pause = if too_hot {
+                Some("too hot")
+            } else if cfg.pause_fullscreen && sensed.0 {
                 Some("game or fullscreen app")
             } else if cfg.pause_battery && sensed.1 {
                 Some("on battery")
             } else if policy.pause_busy && sensed.3 {
-                Some("PC busy")
+                Some(if cfg!(target_os = "macos") { "Mac busy" } else { "PC busy" })
             } else {
                 None
             };

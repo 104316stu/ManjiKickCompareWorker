@@ -36,8 +36,8 @@ zeroize = "1"
 getrandom = "0.2"
 
 # TLS: Windows uses SChannel through native-tls (no C compiler needed on the
-# GNU toolchain); Linux uses rustls with bundled webpki roots, so a bare
-# container without a CA store still works.
+# GNU toolchain); macOS uses its own through native-tls too; Linux uses rustls
+# with bundled webpki roots, so a bare container without a CA store still works.
 [target.'cfg(windows)'.dependencies]
 ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 native-tls = "0.2"
@@ -74,5 +74,17 @@ windows-sys = { version = "0.59", features = [
 embed-resource = "3"
 
 [target.'cfg(unix)'.dependencies]
-ureq = { version = "2.12", default-features = false, features = ["tls"] }
 libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+
+# macOS: the system's TLS (and its trust store), and AppKit + WebKit for the
+# menu bar app.
+[target.'cfg(target_os = "macos")'.dependencies]
+ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
+native-tls = "0.2"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+objc2-web-kit = "0.3"

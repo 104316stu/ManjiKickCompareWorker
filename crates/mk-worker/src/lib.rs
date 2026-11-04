@@ -2,7 +2,8 @@
 //! (/api/worker/v1), runs them on
 //! this machine with mk-core and posts the results. Two faces share this
 //! library: the `mkworker` CLI (Linux, and Windows for debugging) and the
-//! `mkworker-tray` Windows tray app.
+//! `mkworker-tray` Windows tray app. On macOS one program is both: the CLI,
+//! and the menu bar app when started from its .app (macapp.rs).
 
 pub mod api;
 pub mod config;
@@ -25,6 +26,10 @@ pub mod install;
 pub mod popup;
 #[cfg(windows)]
 pub mod tray;
+#[cfg(target_os = "macos")]
+pub mod macapp;
+#[cfg(target_os = "macos")]
+pub mod macinstall;
 
 pub const VERSION: &str = concat!("rs-", env!("CARGO_PKG_VERSION"));
 pub const DEFAULT_SERVER: &str = "https://audios.manjikick.com";

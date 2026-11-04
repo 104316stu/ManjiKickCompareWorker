@@ -106,7 +106,7 @@ pub fn agent(read_timeout: Duration) -> ureq::Agent {
         .timeout_read(read_timeout)
         .timeout_write(Duration::from_secs(60))
         .redirects(5);
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     let b = match native_tls::TlsConnector::new() {
         Ok(c) => b.tls_connector(std::sync::Arc::new(c)),
         Err(_) => b,

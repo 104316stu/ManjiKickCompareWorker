@@ -8,6 +8,6 @@ fn main() {
 
 #[cfg(not(windows))]
 fn main() {
-    eprintln!("mkworker-tray is the Windows tray app; on Linux use `mkworker run`.");
+    eprintln!("mkworker-tray is the Windows tray app; here use `mkworker`.");
     std::process::exit(2);
 }

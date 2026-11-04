@@ -56,9 +56,66 @@ jobs:
           name: mkworker-linux-aarch64
           path: mkworker-linux-aarch64
 
+  macos:
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "11.0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --target aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo test --release -p mk-worker
+      - run: cargo build --release -p mk-worker --bin mkworker --target aarch64-apple-darwin
+      - run: cargo build --release -p mk-worker --bin mkworker --target x86_64-apple-darwin
+      - name: one program for both kinds of Mac
+        run: |
+          mkdir dist
+          lipo -create -output dist/mkworker-macos \
+            target/aarch64-apple-darwin/release/mkworker target/x86_64-apple-darwin/release/mkworker
+          codesign --force --sign - --identifier com.manjikick.worker dist/mkworker-macos
+          lipo -archs dist/mkworker-macos
+          cd dist && shasum -a 256 mkworker-macos > SHA256SUMS
+      - name: a newer build to update to
+        run: |
+          sed -i '' 's/^version = .*/version = "9.9.9"/' crates/mk-worker/Cargo.toml
+          cargo build --release -p mk-worker --bin mkworker --target aarch64-apple-darwin
+          mkdir newer
+          cp target/aarch64-apple-darwin/release/mkworker newer/mkworker-macos
+          codesign --force --sign - --identifier com.manjikick.worker newer/mkworker-macos
+          cd newer && shasum -a 256 mkworker-macos > SHA256SUMS
+          git checkout ../crates/mk-worker/Cargo.toml
+      - name: helpers and the real site
+        run: |
+          MKW_HOME="$RUNNER_TEMP/doctor" dist/mkworker-macos doctor
+          MKW_HOME="$RUNNER_TEMP/doctor" dist/mkworker-macos doctor
+          MKW_HOME="$RUNNER_TEMP/doctor" dist/mkworker-macos test-download dQw4w9WgXcQ || echo "download refused here"
+      - name: install, crash, quit, update, uninstall
+        run: python3 scripts/mac_check.py dist newer
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-shots
+          path: mac-shots
+          if-no-files-found: ignore
+      - run: cp scripts/install-mac.sh dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mkworker-macos
+          path: |
+            dist/mkworker-macos
+            dist/install-mac.sh
+
+  macos-intel:
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo test --release -p mk-worker
+      - run: cargo build --release -p mk-worker --bin mkworker
+      - run: MKW_HOME="$RUNNER_TEMP/doctor" target/release/mkworker doctor
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [windows, linux, linux-arm]
+    needs: [windows, linux, linux-arm, macos, macos-intel]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -68,7 +125,7 @@ jobs:
           path: dist
           merge-multiple: true
       - name: checksums
-        run: cd dist && sha256sum mkworker.exe mkworker-tray.exe mkworker-linux-x86_64 mkworker-linux-aarch64 > SHA256SUMS && cat SHA256SUMS
+        run: cd dist && sha256sum mkworker.exe mkworker-tray.exe mkworker-linux-x86_64 mkworker-linux-aarch64 mkworker-macos install-mac.sh > SHA256SUMS && cat SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -76,4 +133,6 @@ jobs:
             dist/mkworker-tray.exe
             dist/mkworker-linux-x86_64
             dist/mkworker-linux-aarch64
+            dist/mkworker-macos
+            dist/install-mac.sh
             dist/SHA256SUMS

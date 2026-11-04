@@ -7,6 +7,10 @@
 //!   mkworker token set        (reads the token from stdin)
 //!   mkworker pair [--name N]  (connect to the site by approving a code)
 //!   mkworker update
+//!   mkworker doctor
+//!   mkworker install | uninstall [--everything]   (macOS)
+//!
+//! On macOS this is also the menu bar app: started from its .app, or with `app`.
 
 use mkworker::config::{Config, Mode};
 use mkworker::engine::{Engine, Shared};
@@ -33,6 +37,9 @@ usage:
   mkworker token set         save the token read from stdin
   mkworker update            install the latest release now
   mkworker test-download ID  check yt-dlp + ffmpeg here with one YouTube video
+  mkworker doctor            check everything a worker needs on this machine
+  mkworker install           macOS: install the menu bar app and start it
+  mkworker uninstall         macOS: remove it (--everything: settings and token too)
   mkworker version";
 
 /// The pid file this process wrote, removed again on any exit.
@@ -59,8 +66,36 @@ fn main() {
         mkworker::update::set_asset("mkworker-linux-x86_64");
     } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
         mkworker::update::set_asset("mkworker-linux-aarch64");
+    } else if cfg!(target_os = "macos") {
+        mkworker::update::set_asset("mkworker-macos");
     }
     let paths = Paths::get();
+    #[cfg(target_os = "macos")]
+    {
+        // Finder on old systems passes a -psn_ argument.
+        let first = args.first().map(String::as_str);
+        let opened = first.is_none_or(|a| a.starts_with("-psn")) && mkworker::macinstall::in_bundle();
+        if opened || first == Some("app") {
+            mkworker::macapp::main();
+            return;
+        }
+        match first {
+            Some("install") => {
+                match mkworker::macinstall::install() {
+                    Ok(()) => println!("installed to {}", mkworker::macinstall::app_dir().display()),
+                    Err(e) => die(&e),
+                }
+                return;
+            }
+            Some("uninstall") => {
+                let everything = args.iter().any(|a| a == "--everything");
+                mkworker::macinstall::uninstall(everything);
+                println!("removed{}", if everything { " with settings and token" } else { "" });
+                return;
+            }
+            _ => {}
+        }
+    }
     match args.first().map(String::as_str) {
         Some("run") => run(&paths, &args[1..]),
         Some("pair") => pair(&paths, &args[1..]),
@@ -68,6 +103,7 @@ fn main() {
         Some("status") => status(&paths, args.iter().any(|a| a == "--json")),
         Some("stop") => stop(&paths),
         Some("test-download") => test_download(&paths, args.get(1)),
+        Some("doctor") => doctor(&paths),
         Some("token") if args.get(1).map(String::as_str) == Some("set") => token_set(&paths),
         Some("version") | Some("--version") | Some("-V") => {
             println!("mkworker {} ({})", mkworker::VERSION, mkworker::user_agent())
@@ -150,6 +186,71 @@ fn test_download(paths: &Paths, id: Option<&String>) {
     match mkworker::job::probe(paths, &tools, id) {
         Ok(msg) => println!("ok: {msg}"),
         Err(e) => die(&e),
+    }
+}
+
+/// One line per thing a worker needs; exits 1 if something is broken.
+fn doctor(paths: &Paths) {
+    let bad = std::cell::Cell::new(false);
+    let line = |ok: bool, what: &str, detail: String| {
+        println!("{} {what}: {detail}", if ok { "ok  " } else { "FAIL" });
+        if !ok {
+            bad.set(true);
+        }
+    };
+    println!("{} ({})", mkworker::VERSION, mkworker::user_agent());
+    paths.create_all();
+    let cfg = Config::load(&paths.config_file());
+    println!("data: {}\nlog: {}", paths.config_dir.display(), paths.log_file.display());
+    let writable = std::fs::write(paths.tmp_dir.join("doctor"), "x").is_ok();
+    line(writable, "work folder", paths.tmp_dir.display().to_string());
+    let _ = std::fs::remove_file(paths.tmp_dir.join("doctor"));
+    println!("token: {}", if paths.read_token().is_some() { "saved" } else { "none yet (registers by itself)" });
+    let site = mkworker::api::agent(Duration::from_secs(20)).get(&cfg.server).call();
+    line(!matches!(site, Err(ureq::Error::Transport(_))), "site", match site {
+        Ok(r) => format!("{} answered {}", cfg.server, r.status()),
+        Err(ureq::Error::Status(c, _)) => format!("{} answered {c}", cfg.server),
+        Err(e) => e.to_string(),
+    });
+    match mkworker::sidecars::ensure(&cfg, paths, &|m| println!("{m}")) {
+        Ok(tools) => {
+            let run = |exe: &std::path::Path, arg: &str| {
+                let started = std::time::Instant::now();
+                let out = std::process::Command::new(exe).arg(arg).output();
+                match out {
+                    Ok(o) if o.status.success() => {
+                        let text = String::from_utf8_lossy(&o.stdout);
+                        (true, format!("{} ({:.1} s)", text.lines().next().unwrap_or("").trim(), started.elapsed().as_secs_f64()))
+                    }
+                    Ok(o) => (false, format!("exit {:?}", o.status.code())),
+                    Err(e) => (false, e.to_string()),
+                }
+            };
+            let (ok, text) = run(&tools.ytdlp, "--version");
+            line(ok, "yt-dlp", text);
+            let (ok, text) = run(&tools.ffmpeg, "-version");
+            line(ok, "ffmpeg", text);
+            match &tools.deno {
+                Some(d) => {
+                    let (ok, text) = run(d, "--version");
+                    line(ok, "deno", text);
+                }
+                None => println!("deno: not available (YouTube downloads may miss formats)"),
+            }
+        }
+        Err(e) => line(false, "helpers", e),
+    }
+    println!("battery: {} | idle: {:?} s | load: {:?} | cpu ticks: {:?}", platform::on_battery(),
+        platform::idle_seconds().map(|s| s as u64), platform::load_average(), platform::system_ticks());
+    #[cfg(target_os = "macos")]
+    {
+        use mkworker::macinstall as mac;
+        println!("app: {} ({})", mac::app_dir().display(), if mac::installed_exe().exists() { "installed" } else { "not installed" });
+        println!("launch agent: {}, {}", if mac::start_at_login() { "starts at login" } else { "not set" },
+            if mac::loaded() { "loaded" } else { "not loaded" });
+    }
+    if bad.get() {
+        std::process::exit(1);
     }
 }
 

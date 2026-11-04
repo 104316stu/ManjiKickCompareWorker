@@ -1,6 +1,9 @@
 //! Where everything lives. Windows: %LOCALAPPDATA%\ManjiKickWorker\.
 //! Linux: XDG dirs (~/.config/mkworker, ~/.local/state/mkworker,
-//! ~/.cache/mkworker). MKW_HOME puts all of it under one folder instead
+//! ~/.cache/mkworker). macOS: ~/Library/Application Support/ManjiKickWorker,
+//! ~/Library/Logs/ManjiKickWorker, ~/Library/Caches/ManjiKickWorker (tmp only:
+//! the helpers stay in Application Support, the system may empty Caches).
+//! MKW_HOME puts all of it under one folder instead
 //! (handy on panels where $HOME is odd).
 
 use std::path::PathBuf;
@@ -44,7 +47,21 @@ impl Paths {
         }
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    fn platform() -> Paths {
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+        let lib = home.join("Library");
+        let base = lib.join("Application Support").join("ManjiKickWorker");
+        Paths {
+            config_dir: base.clone(),
+            state_dir: base.clone(),
+            log_file: lib.join("Logs").join("ManjiKickWorker").join("mkworker.log"),
+            bin_dir: base.join("bin"),
+            tmp_dir: lib.join("Caches").join("ManjiKickWorker").join("tmp"),
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "macos")))]
     fn platform() -> Paths {
         let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
         let xdg = |var: &str, fallback: &str| {

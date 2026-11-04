@@ -14,6 +14,7 @@
 //!   deno = auto                  # also: none
 //!   auto_update = true           # install new releases by itself
 //!   youtube_at_once = 6          # video downloads at once (0 = no limit)
+//!   keep_awake = true            # macOS: no idle sleep while working on mains power
 
 use std::path::Path;
 
@@ -120,6 +121,8 @@ pub struct Config {
     /// Video downloads at once; 0 = no limit. Many at once from one
     /// address is what gets it asked to sign in.
     pub youtube_at_once: usize,
+    /// macOS app: stop idle sleep while working on mains power.
+    pub keep_awake: bool,
 }
 
 impl Default for Config {
@@ -139,6 +142,7 @@ impl Default for Config {
             deno: "auto".into(),
             auto_update: true,
             youtube_at_once: 6,
+            keep_awake: true,
         }
     }
 }
@@ -175,6 +179,7 @@ impl Config {
                 "deno" => c.deno = v.to_string(),
                 "auto_update" => c.auto_update = truthy(v),
                 "youtube_at_once" => c.youtube_at_once = v.parse().unwrap_or(6),
+                "keep_awake" => c.keep_awake = truthy(v),
                 _ => {}
             }
         }
@@ -192,10 +197,10 @@ impl Config {
              # auto = download the pinned build; system = use the one on PATH; or a full path\n\
              ytdlp = {}\nffmpeg = {}\ndeno = {}\nauto_update = {}\n\
              # video downloads at once (0 = no limit)\n\
-             youtube_at_once = {}\n",
+             youtube_at_once = {}\nkeep_awake = {}\n",
             self.server, self.mode.key(), self.threads, self.duty, self.max_video_seconds, self.running,
             self.pause_fullscreen, self.pause_battery, self.ytdlp, self.ffmpeg, self.deno, self.auto_update,
-            self.youtube_at_once
+            self.youtube_at_once, self.keep_awake
         );
         let tmp = path.with_extension("tmp");
         std::fs::write(&tmp, text)?;

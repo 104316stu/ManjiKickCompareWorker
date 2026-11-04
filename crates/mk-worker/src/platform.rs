@@ -225,6 +225,12 @@ mod imp {
     pub fn load_average() -> Option<f64> {
         None
     }
+
+    pub fn background_thread() {}
+
+    pub fn too_hot() -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------- Unix
@@ -235,6 +241,15 @@ mod imp {
     pub fn set_priority(_idle: bool) {
         unsafe {
             libc::setpriority(libc::PRIO_PROCESS, 0, 19);
+        }
+    }
+
+    /// Called by each compare thread. macOS schedules by QoS class, not by
+    /// nice: utility work gives way to the user and may still use every core.
+    pub fn background_thread() {
+        #[cfg(target_os = "macos")]
+        unsafe {
+            libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_UTILITY, 0);
         }
     }
 
@@ -253,6 +268,19 @@ mod imp {
     }
 
     /// The calling thread's CPU seconds.
+    #[cfg(target_os = "macos")]
+    pub fn thread_cpu_seconds() -> f64 {
+        unsafe {
+            let mut t: libc::timespec = std::mem::zeroed();
+            if libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut t) != 0 {
+                return 0.0;
+            }
+            t.tv_sec as f64 + t.tv_nsec as f64 / 1e9
+        }
+    }
+
+    /// The calling thread's CPU seconds.
+    #[cfg(not(target_os = "macos"))]
     pub fn thread_cpu_seconds() -> f64 {
         unsafe {
             let mut r: libc::rusage = std::mem::zeroed();
@@ -271,6 +299,25 @@ mod imp {
         cpu_seconds()
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn system_ticks() -> Option<(u64, u64)> {
+        extern "C" {
+            fn mach_host_self() -> u32;
+            fn host_statistics(host: u32, flavor: i32, info: *mut i32, count: *mut u32) -> i32;
+        }
+        const HOST_CPU_LOAD_INFO: i32 = 3;
+        // user, system, idle, nice
+        let mut ticks = [0i32; 4];
+        let mut count = 4u32;
+        let r = unsafe { host_statistics(mach_host_self(), HOST_CPU_LOAD_INFO, ticks.as_mut_ptr(), &mut count) };
+        if r != 0 {
+            return None;
+        }
+        let t = ticks.map(|v| v as u32 as u64);
+        Some((t[0] + t[1] + t[3], t.iter().sum()))
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub fn system_ticks() -> Option<(u64, u64)> {
         let text = std::fs::read_to_string("/proc/stat").ok()?;
         let line = text.lines().next()?;
@@ -317,9 +364,38 @@ mod imp {
         Some(Instance)
     }
 
+    /// Kept up to date by the menu bar app, which can see it.
+    #[cfg(target_os = "macos")]
+    pub static FULLSCREEN: AtomicBool = AtomicBool::new(false);
+
+    #[cfg(target_os = "macos")]
+    pub fn fullscreen() -> bool {
+        FULLSCREEN.load(Ordering::Relaxed)
+    }
+    #[cfg(not(target_os = "macos"))]
     pub fn fullscreen() -> bool {
         false
     }
+
+    #[cfg(target_os = "macos")]
+    #[link(name = "IOKit", kind = "framework")]
+    extern "C" {
+        fn IOPSGetTimeRemainingEstimate() -> f64;
+    }
+
+    #[cfg(target_os = "macos")]
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGEventSourceSecondsSinceLastEventType(state: i32, event: u32) -> f64;
+    }
+
+    /// kIOPSTimeRemainingUnlimited (-2) means on mains power.
+    #[cfg(target_os = "macos")]
+    pub fn on_battery() -> bool {
+        unsafe { IOPSGetTimeRemainingEstimate() != -2.0 }
+    }
+
+    #[cfg(not(target_os = "macos"))]
     pub fn on_battery() -> bool {
         // AC adapters show up as power_supply entries of type Mains.
         let Ok(dir) = std::fs::read_dir("/sys/class/power_supply") else { return false };
@@ -335,11 +411,39 @@ mod imp {
         }
         mains
     }
+    /// Seconds since the last keyboard or mouse event (no permission needed).
+    #[cfg(target_os = "macos")]
+    pub fn idle_seconds() -> Option<f64> {
+        // kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType
+        let s = unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) };
+        (s.is_finite() && s >= 0.0).then_some(s)
+    }
+    #[cfg(not(target_os = "macos"))]
     pub fn idle_seconds() -> Option<f64> {
         None
     }
+
+    #[cfg(target_os = "macos")]
+    pub fn load_average() -> Option<f64> {
+        let mut l = [0f64; 1];
+        (unsafe { libc::getloadavg(l.as_mut_ptr(), 1) } == 1).then_some(l[0])
+    }
+    #[cfg(not(target_os = "macos"))]
     pub fn load_average() -> Option<f64> {
         std::fs::read_to_string("/proc/loadavg").ok()?.split_whitespace().next()?.parse().ok()
+    }
+
+    /// The system is slowing itself down for heat (a laptop in a bag, a
+    /// blocked fan): worth stopping for.
+    #[cfg(target_os = "macos")]
+    pub fn too_hot() -> bool {
+        use objc2_foundation::{NSProcessInfo, NSProcessInfoThermalState};
+        let state = NSProcessInfo::processInfo().thermalState();
+        state == NSProcessInfoThermalState::Serious || state == NSProcessInfoThermalState::Critical
+    }
+    #[cfg(not(target_os = "macos"))]
+    pub fn too_hot() -> bool {
+        false
     }
 
     /// Opens and locks the pid file; None while another worker holds it.
@@ -354,6 +458,16 @@ mod imp {
     /// Whether `pid` runs this same program (so a stale pid file can't
     /// make `stop` signal something else).
     pub fn is_our_program(pid: i32) -> bool {
+        #[cfg(target_os = "macos")]
+        let theirs = {
+            let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+            let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr() as *mut _, buf.len() as u32) };
+            if n <= 0 {
+                return false;
+            }
+            std::path::PathBuf::from(String::from_utf8_lossy(&buf[..n as usize]).to_string())
+        };
+        #[cfg(not(target_os = "macos"))]
         let Ok(theirs) = std::fs::read_link(format!("/proc/{pid}/exe")) else { return false };
         let theirs = theirs.to_string_lossy().trim_end_matches(" (deleted)").to_string();
         let Ok(ours) = std::env::current_exe() else { return false };
@@ -396,6 +510,11 @@ pub fn open_url(url: &str) {
     #[cfg(windows)]
     {
         let _ = crate::proc::spawn_outside(std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", url]), 0);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("/usr/bin/open").arg(url)
+            .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
     }
     #[cfg(target_os = "linux")]
     {

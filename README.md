@@ -11,6 +11,7 @@ Get the latest build from [Releases](../../releases):
 
 - Windows: `mkworker-tray.exe` (tray app) and `mkworker.exe` (command line)
 - Linux: `mkworker-linux-x86_64` or `mkworker-linux-aarch64` (ARM), static, no dependencies
+- Mac: one line in Terminal (below), Apple silicon and Intel, macOS 11 or newer
 
 Connect it to the site by approving a code (below); it updates itself from new releases
 (`auto_update = false` in the config turns that off, `mkworker update` updates now).
@@ -39,6 +40,24 @@ Start on boot without root: `crontab -e`, add
 ```
 
 Check that downloads work here: `~/mkworker test-download dQw4w9WgXcQ`.
+
+## Mac
+
+Paste this in Terminal. No admin password needed:
+
+```sh
+curl -fsSL https://github.com/104316stu/ManjiKickCompareWorker/releases/latest/download/install-mac.sh | sh
+```
+
+It installs to `~/Applications`, puts an icon in the menu bar and connects by itself. Click the icon
+for the panel, right-click for the menu. It starts at login, comes back after a crash and updates
+itself. While plugged in it keeps the Mac from idle sleeping during work (the screen still sleeps);
+turn that off in the menu. It also pauses when the Mac gets too hot.
+
+If macOS says a background item was added, leave it on: that is what starts it at login.
+
+Command line: `~/Applications/ManjiKick\ Worker.app/Contents/MacOS/mkworker status` (also `doctor`, `stop`).
+Uninstall from the menu, or with `uninstall --everything`.
 
 ## HidenCloud
 
@@ -74,5 +93,5 @@ Tray: pick the mode in the menu. Command line: `--mode light|balanced|max|auto`
 
 If YouTube keeps asking this machine to sign in, point `MKW_COOKIES` at a cookies.txt (Netscape format) for a YouTube account.
 
-Settings live in `%LOCALAPPDATA%\ManjiKickWorker\config` (Windows) or `~/.config/mkworker/config`
-(Linux). Set `ytdlp`, `ffmpeg` or `deno` to `system` or a path to use your own copies.
+Settings live in `%LOCALAPPDATA%\ManjiKickWorker\config` (Windows), `~/.config/mkworker/config`
+(Linux) or `~/Library/Application Support/ManjiKickWorker/config` (Mac). Set `ytdlp`, `ffmpeg` or `deno` to `system` or a path to use your own copies.

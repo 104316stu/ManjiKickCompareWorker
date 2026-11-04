@@ -47,8 +47,11 @@ pub struct Release {
 pub fn check() -> Result<Option<Release>, String> {
     let name = asset().ok_or("no release asset for this program")?;
     let agent = crate::api::agent(Duration::from_secs(30));
+    // MKW_UPDATE_URL: a test server in place of GitHub (it still has to serve
+    // a SHA256SUMS the build matches).
+    let url = std::env::var("MKW_UPDATE_URL").unwrap_or_else(|_| LATEST_URL.to_string());
     let resp = agent
-        .get(LATEST_URL)
+        .get(&url)
         .set("Accept", "application/vnd.github+json")
         .call();
     let resp = match resp {

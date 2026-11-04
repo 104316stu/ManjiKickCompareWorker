@@ -50,11 +50,21 @@ fn post(server: &str, path: &str, body: &Value) -> Result<Value, String> {
 pub fn hostname() -> String {
     let raw = std::env::var("COMPUTERNAME")
         .ok()
+        .or_else(mac_computer_name)
         .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
         .or_else(|| std::env::var("HOSTNAME").ok())
         .unwrap_or_default();
     let name = raw.trim();
     if name.is_empty() { "worker".into() } else { name.chars().take(60).collect() }
+}
+
+/// The name set in System Settings > General > Sharing.
+fn mac_computer_name() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output().ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 pub fn start(server: &str, name: &str) -> Result<Started, String> {
