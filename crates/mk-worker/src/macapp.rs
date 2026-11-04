@@ -596,13 +596,12 @@ fn finish(limit: Duration) -> ! {
         std::process::exit(0);
     }
     if sh.st.lock().unwrap().restart {
-        // The same process becomes the new program, so launchd keeps it.
-        if let Ok(exe) = std::env::current_exe() {
-            if let Err(e) = crate::update::relaunch(&exe) {
-                crate::log!("{e}");
-                std::process::exit(1); // not a clean stop: launchd starts us again
-            }
+        // A new process, not exec: an exec'd app keeps running but the window
+        // server has lost it, so the menu bar icon never comes back.
+        if std::env::var_os(install::AGENT_ENV).is_some() {
+            std::process::exit(75); // not a clean stop: launchd starts the new program
         }
+        install::open_later();
     }
     std::process::exit(0);
 }

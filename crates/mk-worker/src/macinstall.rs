@@ -254,6 +254,13 @@ pub fn install() -> Result<(), String> {
     }
 }
 
+/// Opens the app again just after this process has exited.
+pub fn open_later() {
+    use std::os::unix::process::CommandExt;
+    let _ = Command::new("/bin/sh").args(["-c", "sleep 2; exec /usr/bin/open \"$0\""]).arg(app_dir())
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).process_group(0).spawn();
+}
+
 /// Removes the agent file now; after this process has exited, a helper
 /// unloads the agent and deletes the app (and all data when `everything`).
 pub fn uninstall(everything: bool) {

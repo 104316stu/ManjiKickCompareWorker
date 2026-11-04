@@ -150,11 +150,16 @@ def main():
 
     offer_update.set()
     subprocess.run(["launchctl", "kickstart", "-k", LABEL], check=True)
-    wait("it updates itself to 9.9.9", lambda: "9.9.9" in str(status().get("version")), 180)
+    before = pid()
+    wait("it updates itself to 9.9.9", lambda: "9.9.9" in str(status().get("version")), 240)
+    wait("the update is a new process", lambda: pid() not in (None, before))
     plist = APP / "Contents/Info.plist"
     wait("the bundle says 9.9.9", lambda: "9.9.9" in plist.read_text())
     wait("still run by launchd after the update", pid)
     wait("still working after the update", lambda: status().get("at", 0) > time.time() - 30)
+    (DATA / "open-panel").write_text("")
+    wait("the panel opens after the update", lambda: not (DATA / "open-panel").exists())
+    time.sleep(3)
     shot("updated.png")
 
     subprocess.run([str(EXE), "uninstall", "--everything"], check=True)
